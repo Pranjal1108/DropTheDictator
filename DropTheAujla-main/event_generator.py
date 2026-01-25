@@ -56,13 +56,45 @@ class EventGenerator:
         return events
     
     def _create_round_start_event(self, result: Dict) -> Dict:
-        """Create round start event"""
+        """Create round start event with terminal depth for world construction.
+        
+        The frontend receives terminal_depth_y (where to place blocking geometry)
+        rather than final_payout directly. This inverts the dependency:
+        - Payout determines world construction (blocking geometry)
+        - Physics determines motion
+        - Max depth reached determines final score
+        """
+        # Convert payout to terminal depth (Y coordinate)
+        # Higher payout = deeper descent = larger Y value
+        # World height is approximately 20000, ground at 18500
+        WORLD_START_Y = 0
+        WORLD_GROUND_Y = 18500
+        MAX_DESCENT = WORLD_GROUND_Y - 1000  # Maximum reachable depth
+        
+        final_payout = result['final_payout']
+        bet_amount = result['bet_amount']
+        
+        # Calculate payout ratio (0 to MAX_WIN multiplier, e.g. 0 to 5000)
+        max_multiplier = 10  # Reasonable max for depth calculation
+        payout_ratio = min((final_payout / bet_amount) if bet_amount > 0 else 0, max_multiplier) / max_multiplier
+        
+        # Terminal depth: linear mapping from payout ratio to depth
+        # Zero payout = early stop, max payout = near ground
+        terminal_depth_y = int(WORLD_START_Y + payout_ratio * MAX_DESCENT)
+        
         return {
             'type': 'round_start',
             'timestamp': int(time.time() * 1000),
             'bet_amount': result['bet_amount'],
             'nonce': result['nonce'],
             'server_seed_hash': result['server_seed_hash'],
+            'spawn_data': result.get('spawn_data', {}),
+            # Send terminal_depth_y instead of final_payout
+            # Frontend will calculate score from max_depth_reached
+            'terminal_depth_y': terminal_depth_y,
+            'max_payout_at_ground': bet_amount * max_multiplier,  # For score calculation
+            'black_hole_triggered': result['black_hole_triggered'],
+            'black_hole_multiplier': result['black_hole_multiplier'],
         }
     
     def _create_collectible_events(self, result: Dict) -> List[Dict]:

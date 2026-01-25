@@ -352,6 +352,9 @@ class GameMath:
         # Generate collectibles (simplified for now)
         collectibles = self._generate_collectibles()
         
+        # Generate spawn positions for visual elements
+        spawn_data = self._generate_spawn_data(black_hole_triggered)
+        
         # Calculate final payout
         payout_data = PayoutEngine.calculate_final_payout(
             bet_amount,
@@ -367,6 +370,7 @@ class GameMath:
             'collectibles': collectibles,
             'black_hole_triggered': black_hole_triggered,
             'black_hole_multiplier': black_hole_multiplier,
+            'spawn_data': spawn_data,
             **payout_data,
             'server_seed_hash': self.rng.get_server_seed_hash(),
         }
@@ -387,6 +391,117 @@ class GameMath:
         
         return collectibles
     
+    def _generate_spawn_data(self, black_hole_triggered: bool) -> Dict:
+        """
+        Generate all spawn positions using provably fair RNG.
+        Frontend should use these positions instead of Math.random()
+        
+        Returns:
+            Dictionary with all spawn data
+        """
+        # World constants (matching frontend)
+        SCREEN_W = 1920
+        WORLDH = 20000
+        GROUND_Y = WORLDH - 700  # GROUND_HEIGHT = 700
+        DEADZONE = 1500
+        TOP_SAFE = DEADZONE
+        BOTTOM_SAFE = GROUND_Y - DEADZONE
+        
+        # DESCENT CORRIDOR CONSTANTS
+        # Matches frontend map center (roughly 8000)
+        WORLD_CENTER_X = 8000 
+        CORRIDOR_WIDTH = 1400  # Narrow corridor to force interaction
+        CORRIDOR_MIN_X = WORLD_CENTER_X - (CORRIDOR_WIDTH / 2)
+        CORRIDOR_MAX_X = WORLD_CENTER_X + (CORRIDOR_WIDTH / 2)
+        
+        spawn_data = {
+            'collectibles': [],
+            'black_holes': [],
+            'clouds': [],
+            'dark_clouds': [],
+            'pushables': [],
+            'config': {
+                'screen_w': SCREEN_W,
+                'world_h': WORLDH,
+                'ground_y': GROUND_Y,
+                'deadzone': DEADZONE,
+                'corridor_width': CORRIDOR_WIDTH,
+                'world_center_x': WORLD_CENTER_X
+            }
+        }
+        
+        # Helper for random X within corridor
+        def get_corridor_x():
+            return CORRIDOR_MIN_X + self.rng.generate_random() * CORRIDOR_WIDTH
+        
+        # Generate collectible positions
+        collectible_count = 300 
+        for i in range(collectible_count):
+            ctype = 'chain' if self.rng.generate_random() < 0.4 else 'music'
+            x = get_corridor_x()
+            y = TOP_SAFE + self.rng.generate_random() * (BOTTOM_SAFE - TOP_SAFE)
+            spawn_data['collectibles'].append({
+                'type': ctype,
+                'x': round(x, 2),
+                'y': round(y, 2),
+                'index': i
+            })
+        
+        # Generate black hole positions
+        bh_count = 50 
+        BH_SIZE = 300
+        for i in range(bh_count):
+            x = get_corridor_x()
+            y = TOP_SAFE + self.rng.generate_random() * (BOTTOM_SAFE - DEADZONE - BH_SIZE - TOP_SAFE)
+            # Mark which black hole will trigger bonus (if any)
+            will_trigger = (i == 0 and black_hole_triggered)
+            spawn_data['black_holes'].append({
+                'x': round(x, 2),
+                'y': round(y, 2),
+                'will_trigger': will_trigger,
+                'index': i
+            })
+        
+        # Generate cloud positions
+        cloud_count = 200 
+        CLOUD_H = 280
+        for i in range(cloud_count):
+            cloud_type = 1 if self.rng.generate_random() < 0.5 else 2
+            x = get_corridor_x()
+            y = TOP_SAFE + self.rng.generate_random() * (BOTTOM_SAFE - CLOUD_H - TOP_SAFE)
+            spawn_data['clouds'].append({
+                'type': cloud_type,
+                'x': round(x, 2),
+                'y': round(y, 2),
+                'index': i
+            })
+        
+        # Generate dark cloud positions
+        dark_cloud_count = 40
+        DARK_H = 280
+        for i in range(dark_cloud_count):
+            x = get_corridor_x()
+            y = TOP_SAFE + self.rng.generate_random() * (GROUND_Y - 500 - DARK_H - TOP_SAFE)
+            spawn_data['dark_clouds'].append({
+                'x': round(x, 2),
+                'y': round(y, 2),
+                'index': i
+            })
+        
+        # Generate pushable positions
+        pushable_count = 20 
+        PUSHABLE_SIZE = 550
+        for i in range(pushable_count):
+            x = get_corridor_x()
+            y = TOP_SAFE + self.rng.generate_random() * (BOTTOM_SAFE - PUSHABLE_SIZE - TOP_SAFE)
+            spawn_data['pushables'].append({
+                'x': round(x, 2),
+                'y': round(y, 2),
+                'index': i
+            })
+        
+        return spawn_data
+    
     def get_verification_data(self) -> Dict[str, str]:
         """Get data needed for provably fair verification"""
         return {
@@ -394,3 +509,4 @@ class GameMath:
             'client_seed': self.rng.client_seed,
             'current_nonce': self.rng.nonce,
         }
+
