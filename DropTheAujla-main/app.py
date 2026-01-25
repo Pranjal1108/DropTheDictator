@@ -29,11 +29,14 @@ def bet():
     else:
         multiplier = 4.0
 
-    target_payout = bet_amount * multiplier
+    # Send events instead of targetPayout
+    events = [
+        {'type': 'round_start', 'bet': bet_amount},
+        {'type': 'win', 'multiplier': multiplier, 'payout': bet_amount * multiplier}
+    ]
 
     return jsonify({
-        'targetPayout': target_payout,
-        'cloudPlan': ['support', 'boost', 'boost', 'terminator']
+        'events': events
     })
 
 if __name__ == '__main__':
