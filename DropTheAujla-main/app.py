@@ -154,6 +154,173 @@ def calculate_outcome(rng_value: float, bet: int, mode: str = 'normal') -> dict:
     }
 
 # ═══════════════════════════════════════════════════════════════════════════
+# PAYOUT EVENT DECOMPOSITION - FORCED INTERACTIONS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def decompose_payout_to_events(outcome: dict, rng_value: float) -> list:
+    """
+    Decompose final payout into individual forced events.
+    Each event represents a mandatory interaction the player MUST hit.
+    
+    Returns list of: { type, value_contribution, y_position, funnel_required }
+    """
+    events = []
+    payout = outcome['payout']
+    terminal_depth = outcome['terminal_depth_y']
+    
+    # Zero payout = no events, early termination
+    if outcome['is_loss'] or payout == 0:
+        return []
+    
+    # Calculate how many events based on payout magnitude
+    # Small wins: 1-2 events, Big wins: 4-6 events
+    multiplier = outcome['multiplier']
+    
+    if multiplier < 1.0:
+        num_events = 1
+    elif multiplier < 3.0:
+        num_events = 2
+    elif multiplier < 10.0:
+        num_events = 3
+    elif multiplier < 50.0:
+        num_events = 4
+    else:
+        num_events = 5
+    
+    # Distribute payout across events (not equally - varied for natural feel)
+    base_portion = 0.3  # 30% is "base" just from falling
+    event_portion = 0.7  # 70% from collectibles
+    
+    remaining_value = int(payout * event_portion)
+    
+    # Space events evenly between start and terminal depth
+    fall_distance = terminal_depth - DEADZONE - 500
+    event_spacing = fall_distance / (num_events + 1)
+    
+    for i in range(num_events):
+        # Calculate Y position for this event
+        y_position = DEADZONE + int((i + 1) * event_spacing)
+        
+        # Calculate value contribution (varied using seeded random)
+        if i == num_events - 1:
+            # Last event gets remaining value
+            value = remaining_value
+        else:
+            # Random portion between 15-35% of remaining
+            portion = 0.15 + seeded_random(rng_value, 1000 + i) * 0.20
+            value = int(remaining_value * portion)
+            remaining_value -= value
+        
+        events.append({
+            'type': 'collectible',
+            'value_contribution': value,
+            'y_position': y_position,
+            'funnel_required': True,
+            'event_index': i
+        })
+    
+    # Add black hole event if triggered
+    if outcome['black_hole_triggered']:
+        bh_y = DEADZONE + int(0.7 * fall_distance)  # 70% down the path
+        events.append({
+            'type': 'black_hole',
+            'value_contribution': 0,  # Multiplier applied to total
+            'y_position': bh_y,
+            'funnel_required': True,
+            'multiplier': outcome['black_hole_multiplier'],
+            'event_index': len(events)
+        })
+    
+    # Sort events by Y position (top to bottom)
+    events.sort(key=lambda e: e['y_position'])
+    
+    return events
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FUNNEL GEOMETRY GENERATION - FORCED PATH
+# ═══════════════════════════════════════════════════════════════════════════
+
+def generate_event_funnel(event: dict, corridor: dict, rng_value: float) -> dict:
+    """
+    Generate V-shaped funnel formation that GUARANTEES player passes through event.
+    The event item is placed at the funnel throat.
+    
+    Funnel structure:
+        \\     /    <- Upper wings (angled inward)
+         \\   /
+          \\ /
+           *       <- Event item at throat
+          ===      <- Catch platform below
+    """
+    y = event['y_position']
+    event_idx = event['event_index']
+    
+    # Funnel dimensions
+    funnel_width = 600  # Width at top of funnel
+    throat_width = 150  # Width at throat (just wider than player)
+    funnel_height = 400  # Vertical height of funnel
+    
+    # Slight random offset to feel natural (but still centered in corridor)
+    offset = (seeded_random(rng_value, 2000 + event_idx) - 0.5) * 100
+    center_x = corridor['center_x'] + offset
+    
+    clouds = []
+    
+    # Upper left wing (angled cloud)
+    clouds.append({
+        'x': center_x - funnel_width / 2 - CLOUD1_W / 2,
+        'y': y - funnel_height,
+        'type': 'funnel_wing',
+        'cloud_type': 1,
+        'angle': 15  # Degrees, tilted inward
+    })
+    
+    # Upper right wing (angled cloud)
+    clouds.append({
+        'x': center_x + funnel_width / 2 - CLOUD1_W / 2,
+        'y': y - funnel_height,
+        'type': 'funnel_wing',
+        'cloud_type': 1,
+        'angle': -15  # Tilted inward
+    })
+    
+    # Middle guide clouds (narrowing the path)
+    clouds.append({
+        'x': center_x - throat_width - CLOUD1_W,
+        'y': y - funnel_height / 2,
+        'type': 'funnel_guide',
+        'cloud_type': 2
+    })
+    clouds.append({
+        'x': center_x + throat_width,
+        'y': y - funnel_height / 2,
+        'type': 'funnel_guide',
+        'cloud_type': 2
+    })
+    
+    # Catch platform below throat (prevents falling past without collection)
+    clouds.append({
+        'x': center_x - CLOUD1_W / 2,
+        'y': y + 100,
+        'type': 'funnel_catch',
+        'cloud_type': 1
+    })
+    
+    # Event item position (at throat)
+    item_position = {
+        'x': center_x - 50,  # Centered (100px item width assumed)
+        'y': y
+    }
+    
+    return {
+        'event': event,
+        'clouds': clouds,
+        'item_position': item_position,
+        'center_x': center_x,
+        'throat_y': y
+    }
+
+# ═══════════════════════════════════════════════════════════════════════════
 # WORLD PLAN GENERATION - THE KEY FIX
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -161,6 +328,8 @@ def generate_world_plan(rng_value: float, outcome: dict) -> dict:
     """
     Generate a complete world plan that GUARANTEES the outcome.
     The frontend will build this world exactly - no randomness.
+    
+    NEW: Includes forced event funnels that guarantee player interactions.
     """
 
     terminal_depth = outcome['terminal_depth_y']
@@ -174,6 +343,27 @@ def generate_world_plan(rng_value: float, outcome: dict) -> dict:
         'right_bound': CORRIDOR_CENTER + CORRIDOR_WIDTH // 2
     }
 
+    # ══════════════════════════════════════════════════════════════════════
+    # NEW: Decompose payout into forced events and generate funnels
+    # ══════════════════════════════════════════════════════════════════════
+    forced_events = decompose_payout_to_events(outcome, rng_value)
+    
+    # Generate funnel geometry for each forced event
+    event_funnels = []
+    for event in forced_events:
+        funnel = generate_event_funnel(event, corridor, rng_value)
+        event_funnels.append(funnel)
+    
+    # For zero-payout, set fall=False to prevent any movement
+    if is_loss:
+        return {
+            'fall': False,
+            'corridor': corridor,
+            'terminal_closure': generate_terminal_closure(rng_value, DEADZONE + 500, corridor, True),
+            'forced_events': [],
+            'event_funnels': []
+        }
+
     # Generate guide clouds - these create the path DOWN to terminal depth
     guide_clouds = generate_guide_clouds(rng_value, terminal_depth, corridor)
 
@@ -183,13 +373,42 @@ def generate_world_plan(rng_value: float, outcome: dict) -> dict:
     # Generate wall clouds - block escape outside corridor
     wall_clouds = generate_wall_clouds(rng_value, terminal_depth, corridor)
 
-    # Generate black hole position (if triggered)
+    # Generate black hole position (if triggered) - now placed at funnel throat
     black_hole = None
     if outcome['black_hole_triggered']:
-        black_hole = generate_black_hole_position(rng_value, terminal_depth, corridor)
+        # Find black hole event from forced_events
+        bh_event = next((e for e in forced_events if e['type'] == 'black_hole'), None)
+        if bh_event:
+            bh_funnel = next((f for f in event_funnels if f['event']['type'] == 'black_hole'), None)
+            if bh_funnel:
+                black_hole = {
+                    'x': bh_funnel['item_position']['x'],
+                    'y': bh_funnel['item_position']['y'],
+                    'will_trigger': True
+                }
+        
+        # Fallback to old method if not found
+        if not black_hole:
+            black_hole = generate_black_hole_position(rng_value, terminal_depth, corridor)
 
-    # Generate collectibles (cosmetic only - values come from backend)
-    collectibles = generate_collectibles(rng_value, terminal_depth, corridor)
+    # Place collectibles at funnel throat positions (forced interaction)
+    collectibles = []
+    for funnel in event_funnels:
+        if funnel['event']['type'] == 'collectible':
+            collectibles.append({
+                'x': funnel['item_position']['x'],
+                'y': funnel['item_position']['y'],
+                'type': 'chain' if seeded_random(rng_value, 3000 + funnel['event']['event_index']) < 0.5 else 'music',
+                'value': funnel['event']['value_contribution'],
+                'forced': True
+            })
+    
+    # Add some cosmetic collectibles (not at funnel throats)
+    cosmetic_collectibles = generate_collectibles(rng_value, terminal_depth, corridor)
+    # Mark as not forced (just for display)
+    for c in cosmetic_collectibles:
+        c['forced'] = False
+    collectibles.extend(cosmetic_collectibles[:20])  # Limit cosmetic count
 
     # Generate pushables (cosmetic physics objects)
     pushables = generate_pushables(rng_value, terminal_depth, corridor)
@@ -198,6 +417,7 @@ def generate_world_plan(rng_value: float, outcome: dict) -> dict:
     dark_clouds = generate_dark_clouds(rng_value, terminal_depth, corridor)
 
     return {
+        'fall': True,  # Player should fall
         'corridor': corridor,
         'guide_clouds': guide_clouds,
         'wall_clouds': wall_clouds,
@@ -205,7 +425,10 @@ def generate_world_plan(rng_value: float, outcome: dict) -> dict:
         'black_hole': black_hole,
         'collectibles': collectibles,
         'pushables': pushables,
-        'dark_clouds': dark_clouds
+        'dark_clouds': dark_clouds,
+        # NEW: Forced interaction data
+        'forced_events': forced_events,
+        'event_funnels': event_funnels
     }
 
 def generate_guide_clouds(rng_value: float, terminal_depth: int, corridor: dict) -> list:

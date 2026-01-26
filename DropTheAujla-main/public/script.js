@@ -125,8 +125,17 @@ const gameSession = {
     retryCount: 0,
     maxRetries: 3
 };
-// Visual earnings for animation ONLY - actual payout comes from RGS
-let visualEarnings = 0;
+// ╔════════════════════════════════════════════════════════════════════════════╗
+// ║ STAKE-COMPLIANT CURRENCY SYSTEM - FOUR SEPARATE VARIABLES                  ║
+// ║ 1. backendFinalPayoutDisplay - Authoritative payout from RGS (display units)║
+// ║ 2. backendBetRGS - Locked bet snapshot (never changes mid-round)            ║
+// ║ 3. visualScore - Cosmetic animation score (allowed to lie/animate)          ║
+// ║ 4. visualEarnings - Legacy alias for visualScore (backwards compat)         ║
+// ╚════════════════════════════════════════════════════════════════════════════╝
+let backendFinalPayoutDisplay = 0;  // AUTHORITATIVE: From backend, never calculated
+let backendBetRGS = 0;              // LOCKED: Bet amount snapshot in RGS units
+let visualScore = 0;                // COSMETIC: Animated display, can lie for effect
+let visualEarnings = 0;             // LEGACY: Alias for visualScore (backward compat)
 // Event timeline from RGS - controls what we display and when
 let eventTimeline = [];
 let currentEventIndex = 0;
@@ -136,7 +145,7 @@ let roundStartTime = 0;
 // ║ All spawn positions come from backend - no Math.random() for game logic    ║
 // ╚════════════════════════════════════════════════════════════════════════════╝
 let spawnData = null;  // Will be populated from backend
-let backendFinalPayout = 0;  // Authoritative payout from backend
+let backendFinalPayout = 0;  // Authoritative payout from backend (RGS units)
 let backendBlackHoleTriggered = false;
 let backendBlackHoleMultiplier = 1;
 // ╔════════════════════════════════════════════════════════════════════════════╗
@@ -370,6 +379,23 @@ function handleRGSEvent(event) {
         // ║ FIX: SUPPORT NEW WORLD PLAN ARCHITECTURE                       ║
         // ╚════════════════════════════════════════════════════════════════╝
         case 'round_start':
+            // ╔════════════════════════════════════════════════════════════════╗
+            // ║ STAKE-COMPLIANT: Check if character should fall at all         ║
+            // ║ If fall: false (zero payout), freeze player immediately        ║
+            // ╚════════════════════════════════════════════════════════════════╝
+            if (event.world_plan && event.world_plan.fall === false) {
+                console.log('[WORLD] Zero payout - player does not fall');
+                isZeroPayoutRound = true;
+                backendFinalPayoutDisplay = 0;
+                maxPayoutAtGround = 0;
+                visualScore = 0;
+                visualEarnings = 0;
+                clearWorld();
+                freezePlayerAtStart();
+                triggerImmediateLoss();
+                break;
+            }
+
             // Map backend world_plan to frontend spawnData structure
             if (event.world_plan) {
                 const wp = event.world_plan;
@@ -383,6 +409,8 @@ function handleRGSEvent(event) {
                     collectibles: wp.collectibles || [],
                     pushables: wp.pushables || [],
                     dark_clouds: wp.dark_clouds || [],
+                    tanks: wp.tanks || [],
+                    camps: wp.camps || [],
                     config: wp.corridor // Store corridor config if needed
                 };
 
@@ -393,12 +421,15 @@ function handleRGSEvent(event) {
                     terminalDepthY = event.terminal_depth_y || 18000;
                 }
             } else {
-                // Legacy fallback
-                spawnData = event.spawn_data || null;
+                // Legacy fallback - empty world
+                spawnData = null;
                 terminalDepthY = event.terminal_depth_y || 18000;
             }
 
-            maxPayoutAtGround = event.max_payout_at_ground || betAmount * 10;
+            // STAKE-COMPLIANT: Store backend payout as authoritative source
+            // Backend sends payout in RGS micro-units, convert to display units
+            backendFinalPayoutDisplay = fromRGSAmount(event.max_payout_at_ground || 0);
+            maxPayoutAtGround = backendFinalPayoutDisplay;  // For legacy compatibility
             backendBlackHoleTriggered = event.black_hole_triggered || false;
             backendBlackHoleMultiplier = event.black_hole_multiplier || 1;
             // Initialize depth-based tracking
@@ -407,29 +438,32 @@ function handleRGSEvent(event) {
             hasTriggeredBlackHole = false;
             naturalEndTriggered = false;
             roundEnded = false;
+            gameFrozen = false; // Unfreeze game for new round
             stuckFrameCount = 0; // For detecting when character is stuck
             lastY = camY;
+            // Reset all score variables
+            visualScore = 0;
             visualEarnings = 0;
-            // Check for zero/minimal payout (early terminal depth)
-            if (terminalDepthY < fallStartY + 2000) {
-                console.log('[WORLD] Zero payout round - early terminal depth');
-                isZeroPayoutRound = true;
-                clearWorld();
-                spawnTanks(TANK_COUNT);
-                spawnCamps(CAMP_COUNT);
-            } else {
-                isZeroPayoutRound = false;
-                // Normal round: spawn world with blocking geometry at terminal depth
-                if (spawnData) {
-                    clearWorld();
-                    spawnWorld();
-                    spawnCollectibles();
-                }
-                // Spawn blocking geometry at terminal_depth_y
-                spawnBlockingFormation(terminalDepthY);
+            isZeroPayoutRound = false;
+
+            // Spawn world using ONLY backend data
+            clearWorld();
+            if (spawnData) {
+                spawnWorld();
             }
+            // Spawn blocking geometry at terminal_depth_y
+            spawnBlockingFormation(terminalDepthY);
+
+            // ═══════════════════════════════════════════════════════════════
+            // NEW: Spawn event funnels for forced interactions
+            // ═══════════════════════════════════════════════════════════════
+            if (event.world_plan && event.world_plan.event_funnels) {
+                spawnEventFunnels(event.world_plan.event_funnels);
+            }
+
             console.log('[WORLD] Terminal depth:', terminalDepthY,
-                'Max payout at ground:', maxPayoutAtGround);
+                'Max payout at ground:', maxPayoutAtGround,
+                'Funnels:', event.world_plan?.event_funnels?.length || 0);
             break;
         case 'win':
             animateEarningsTo(event.value);
@@ -457,6 +491,8 @@ function handleRGSEvent(event) {
 }
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║ PROGRESSIVE PAYOUT: Score increases smoothly as character falls            ║
+// ║ STAKE-COMPLIANT: Physics controls WHEN score animates, backend controls    ║
+// ║ HOW MUCH the final value is. visualScore NEVER exceeds backendFinalPayout  ║
 // ╚════════════════════════════════════════════════════════════════════════════╝
 function updateProgressivePayout() {
     if (!progressivePayoutEnabled || isZeroPayoutRound || inBlackHole) return;
@@ -466,8 +502,9 @@ function updateProgressivePayout() {
     const progress = Math.min(Math.max(currentFallDistance / totalFallDistance, 0), 1);
     // Smooth easing for natural feel
     const eased = 1 - Math.pow(1 - progress, 2);
-    // Update visual earnings progressively
-    visualEarnings = payoutProgressTarget * eased;
+    // STAKE-COMPLIANT: Animate towards backend payout, NEVER exceed it
+    visualScore = Math.min(backendFinalPayoutDisplay * eased, backendFinalPayoutDisplay);
+    visualEarnings = visualScore;  // Keep legacy alias in sync
     updateScoreDisplay();
 }
 // ╔════════════════════════════════════════════════════════════════════════════╗
@@ -579,6 +616,76 @@ function spawnBlockingFormation(targetY) {
         });
     });
 }
+
+// ╔════════════════════════════════════════════════════════════════════════════╗
+// ║ FUNNEL FORMATION - V-SHAPED GEOMETRY FOR FORCED INTERACTIONS               ║
+// ║ Funnels guarantee the player passes through collectibles/black holes       ║
+// ╚════════════════════════════════════════════════════════════════════════════╝
+let funnelClouds = []; // Track funnel clouds for collision
+
+function spawnEventFunnels(eventFunnels) {
+    if (!eventFunnels || eventFunnels.length === 0) return;
+
+    console.log(`[FUNNEL] Spawning ${eventFunnels.length} event funnels`);
+
+    // Clear any existing funnel clouds
+    funnelClouds.forEach(c => { if (c.el) c.el.remove(); });
+    funnelClouds = [];
+
+    for (const funnel of eventFunnels) {
+        spawnFunnelFormation(funnel);
+    }
+}
+
+function spawnFunnelFormation(funnel) {
+    if (!funnel || !funnel.clouds) return;
+
+    const eventType = funnel.event?.type || 'unknown';
+    const throatY = funnel.throat_y || funnel.event?.y_position || 0;
+
+    console.log(`[FUNNEL] Spawning ${eventType} funnel at Y:${throatY}`);
+
+    // Spawn each cloud in the funnel formation
+    for (const cloud of funnel.clouds) {
+        const el = document.createElement("div");
+        el.className = `funnel-cloud ${cloud.type}`;
+
+        // Apply rotation for angled clouds
+        const rotation = cloud.angle ? `rotate(${cloud.angle}deg)` : '';
+
+        el.style.cssText = `
+            position: absolute;
+            width: ${CLOUD1_W}px;
+            height: ${CLOUD1_H}px;
+            background: url('items/movcloud${cloud.cloud_type || 1}.png') no-repeat center/contain;
+            left: ${cloud.x}px;
+            top: ${cloud.y}px;
+            z-index: 4;
+            transform: ${rotation};
+            filter: brightness(1.1) saturate(0.8);
+        `;
+        world.appendChild(el);
+
+        // Create collision circles for this cloud
+        const cloudCircles = CLOUD1.map(p => ({
+            x: cloud.x + p.x * CLOUD1_W,
+            y: cloud.y + p.y * CLOUD1_H,
+            r: p.r * CLOUD1_W
+        }));
+
+        funnelClouds.push({
+            x: cloud.x,
+            y: cloud.y,
+            el,
+            circles: cloudCircles,
+            type: cloud.type,
+            isFunnelCloud: true
+        });
+    }
+
+    // The collectible/black hole at the funnel throat is spawned separately
+    // by the existing collectible spawning logic (they're already in spawnData)
+}
 function checkBlockingFormationCollision() {
     if (roundEnded || stoppingClouds.length === 0 || inBlackHole) return false;
     const playerColliders = getPlayerColliders();
@@ -617,8 +724,9 @@ function updateInvertedScore() {
     let progress = Math.min(currentDescent / totalDescent, 1.0);
     // Smooth easing
     const eased = 1 - Math.pow(1 - progress, 2);
-    // Calculate visual earnings purely from depth
-    visualEarnings = maxPayoutAtGround * eased;
+    // STAKE-COMPLIANT: Animate towards backend payout, NEVER exceed it
+    visualScore = Math.min(backendFinalPayoutDisplay * eased, backendFinalPayoutDisplay);
+    visualEarnings = visualScore;  // Keep legacy alias in sync
     updateScoreDisplay();
 }
 // ╔════════════════════════════════════════════════════════════════════════════╗
@@ -631,6 +739,7 @@ function checkNaturalGameEnd() {
     // 2. ZERO PAYOUT: End when crossing threshold with explosion
     if (isZeroPayoutRound && camY > fallStartY + 2000) {
         naturalEndTriggered = true;
+        visualScore = 0;
         visualEarnings = 0;
         triggerExplosion();
         setTimeout(() => {
@@ -662,7 +771,9 @@ function checkNaturalGameEnd() {
         console.log('[PHYSICS] Ground reached');
         naturalEndTriggered = true;
         roundEnded = true;
-        visualEarnings = maxPayoutAtGround;
+        // STAKE-COMPLIANT: Snap to backend payout, not physics value
+        visualScore = backendFinalPayoutDisplay;
+        visualEarnings = visualScore;
         updateScoreDisplay();
         processRoundEnd();
     }
@@ -679,8 +790,8 @@ function processRoundEnd() {
             return;
         }
     }
-    // Fallback if no round_end event found
-    handleRoundEndEvent(visualEarnings);
+    // Fallback if no round_end event found - use backend payout
+    handleRoundEndEvent(backendFinalPayoutDisplay);
 }
 function animateEarningsTo(targetValue) {
     const startValue = visualEarnings;
@@ -868,7 +979,11 @@ function cleanupExplosion() {
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║ FIX #1: handleRoundEndEvent - Triggers explosion on loss (payout = 0)      ║
 // ╚════════════════════════════════════════════════════════════════════════════╝
+let gameFrozen = false; // Flag to freeze all game movement on round end
+
 async function handleRoundEndEvent(finalPayout) {
+    // FREEZE the game - stop all movement
+    gameFrozen = true;
     // Clear any timeout
     if (roundEndTimeout) {
         clearTimeout(roundEndTimeout);
@@ -878,8 +993,12 @@ async function handleRoundEndEvent(finalPayout) {
     fallStarted = false;
     betPlaced = false;
     betResolved = true;
-    // Use backend payout for display
-    visualEarnings = finalPayout;
+    // ╔════════════════════════════════════════════════════════════════════════╗
+    // ║ STAKE-COMPLIANT: Hard-lock backend payout as ONLY source of truth      ║
+    // ╚════════════════════════════════════════════════════════════════════════╝
+    backendFinalPayoutDisplay = finalPayout;
+    visualScore = finalPayout;  // Snap to final value
+    visualEarnings = visualScore;  // Keep legacy alias in sync
     updateScoreDisplay();
     // ╔════════════════════════════════════════════════════════════════════════╗
     // ║ LOSS SCENARIO: If payout is 0, trigger explosion animation             ║
@@ -920,7 +1039,7 @@ async function initializeGame() {
         applyBetConstraints();
         hideLoadingScreen();
         unlockBetUI();
-        showRulesModal();
+        // Rules modal now only shown when rules button is clicked
     } catch (error) {
         const shouldRetry = await handleRGSError(error);
         if (shouldRetry) {
@@ -1033,8 +1152,8 @@ async function completeRound() {
             gameSession.currentRound.simulationId
         );
         gameSession.balance = result.balance;
-        // Use visualEarnings (from backend finalPayout) for consistent display
-        const payoutDisplay = visualEarnings;
+        // STAKE-COMPLIANT: Settlement MUST use authoritative backend payout
+        const payoutDisplay = backendFinalPayoutDisplay;
         // Show end screen (auto-dismiss)
         runOverEl.innerHTML = `${TERMS.roundOver}<br>${TERMS.totalWinnings}: ${TERMS.currency}${payoutDisplay.toFixed(2)}`;
         runOverEl.style.display = "block";
@@ -1250,7 +1369,11 @@ function showScore() {
     updateScoreDisplay();
 }
 function updateScoreDisplay() {
-    scoreEl.textContent = `${TERMS.currency}${visualEarnings.toFixed(2)}`;
+    // STAKE-COMPLIANT: Cap visual score to never exceed backend payout
+    const cappedScore = backendFinalPayoutDisplay > 0
+        ? Math.min(visualScore, backendFinalPayoutDisplay)
+        : visualScore;
+    scoreEl.textContent = `${TERMS.currency}${cappedScore.toFixed(2)}`;
 }
 function showMultiplier(m) {
     multiplierEl.textContent = `×${m.toFixed(2)}`;
@@ -1515,6 +1638,7 @@ function resetGameWorld() {
     awaitingRoundEnd = false;
     eventTimeline = [];
     currentEventIndex = 0;
+    gameFrozen = false; // Unfreeze game for next round
     hideWaitingIndicator();
     spawnWorld();
     spawnCollectibles(PRESET_SPAWN_COUNT);
@@ -2245,7 +2369,9 @@ function update() {
             const progress = Math.min(elapsed / duration, 1);
             showcaseScore = originalEarnings + (finalEarnings - originalEarnings) * progress;
             if (elapsed >= duration) {
-                visualEarnings = finalEarnings;
+                // STAKE-COMPLIANT: Snap to backend payout, not physics-derived value
+                visualScore = backendFinalPayoutDisplay;
+                visualEarnings = visualScore;  // Keep legacy alias in sync
                 exitBlackHole();
                 bhShowcaseStart = 0;
             }
@@ -2277,7 +2403,12 @@ function update() {
         requestAnimationFrame(update);
         return;
     }
-    // Normal game loop
+    // Normal game loop - Skip if game is frozen
+    if (gameFrozen) {
+        render();
+        requestAnimationFrame(update);
+        return;
+    }
     recycleClouds();
     recycleDarkClouds();
     recycleBlackHoles();
@@ -2365,8 +2496,12 @@ function render() {
         scoreEl.style.display = "none";
     } else {
         scoreEl.style.display = "block";
-        const display = (inBlackHole && bhShowcaseStart > 0) ? showcaseScore : visualEarnings;
-        scoreEl.textContent = `${TERMS.currency}${display.toFixed(2)}`;
+        // STAKE-COMPLIANT: Cap display to never exceed backend payout
+        const display = (inBlackHole && bhShowcaseStart > 0) ? showcaseScore : visualScore;
+        const cappedDisplay = backendFinalPayoutDisplay > 0
+            ? Math.min(display, backendFinalPayoutDisplay)
+            : display;
+        scoreEl.textContent = `${TERMS.currency}${cappedDisplay.toFixed(2)}`;
     }
     world.style.transform = `translate(${-camX}px, ${-camY}px)`;
     silverjetWrap.style.left = PLAYER_X + "px";
@@ -2535,29 +2670,39 @@ let animated_clouds_lastTime = performance.now();
 function createAnimatedCloud(layer, count, speedMin, speedMax, yMin, yMax, sizeScale) {
     const container = document.querySelector(layer);
     if (!container) return;
+    // Use full viewport width plus buffer for complete coverage
+    const spawnWidth = Math.max(window.innerWidth, 1920) + 1000;
     for (let i = 0; i < count; i++) {
         const cloud = document.createElement("div");
         const scale = (0.7 + Math.random() * 0.6) * sizeScale;
         const y = Math.random() * (yMax - yMin) + yMin;
-        const x = Math.random() * window.innerWidth + 600;
+        const x = Math.random() * spawnWidth - 500;
         const speed = speedMin + Math.random() * (speedMax - speedMin);
         cloud.style.position = "absolute";
         cloud.style.top = y + "px";
         cloud.style.transform = `translate3d(${x}px, 0, 0) scale(${scale})`;
         container.appendChild(cloud);
-        animated_clouds.push({ el: cloud, x, y, speed, yMin, yMax, scale });
+        animated_clouds.push({ el: cloud, x, y, speed, yMin, yMax, scale, spawnWidth });
     }
 }
-createAnimatedCloud(".back", 12, 200, 450, 0, 850, 0.8);
-createAnimatedCloud(".mid", 8, 450, 600, 0, 1050, 0.9);
-createAnimatedCloud(".front", 6, 700, 1000, 0, 1200, 1.3);
+// Increased cloud counts for better coverage
+createAnimatedCloud(".back", 25, 200, 450, 0, 850, 0.8);
+createAnimatedCloud(".mid", 20, 450, 600, 0, 1050, 0.9);
+createAnimatedCloud(".front", 15, 700, 1000, 0, 1200, 1.3);
 function animateAnimatedClouds(now) {
+    // Skip animation if game is frozen
+    if (typeof gameFrozen !== 'undefined' && gameFrozen) {
+        requestAnimationFrame(animateAnimatedClouds);
+        return;
+    }
     const dt = (now - animated_clouds_lastTime) / 1000;
     animated_clouds_lastTime = now;
+    // Use full viewport width plus buffer for consistent wrapping
+    const viewportWidth = Math.max(window.innerWidth, 1920) + 500;
     animated_clouds.forEach(c => {
         c.x += c.speed * dt;
-        if (c.x > window.innerWidth + 300) {
-            c.x = -300;
+        if (c.x > viewportWidth) {
+            c.x = -500;
             c.y = Math.random() * (c.yMax - c.yMin) + c.yMin;
             c.el.style.top = c.y + "px";
         }
@@ -2574,17 +2719,26 @@ const fastplayBtn = document.createElement('button');
 fastplayBtn.id = 'fastplayBtn';
 fastplayBtn.textContent = TERMS.fastOff;
 fastplayBtn.style.cssText = `
-position: fixed; top: 70px; right: 20px; padding: 8px 16px;
-background: rgba(255, 200, 0, 0.8); color: #000; border: none;
-border-radius: 4px; cursor: pointer; z-index: 999998; font-weight: bold;
+padding: 12px 20px; background: rgba(255, 200, 0, 0.9); color: #000; border: none;
+border-radius: 16px; cursor: pointer; font-weight: 900; font-size: 16px;
+box-shadow: inset 0 0 35px rgba(255,255,255,0.45), 0 18px 40px rgba(0,0,0,0.35);
+white-space: nowrap;
 `;
 fastplayBtn.onclick = () => {
     fastplayEnabled = !fastplayEnabled;
     fastplayBtn.style.background = fastplayEnabled ?
-        'rgba(0, 255, 100, 0.8)' : 'rgba(255, 200, 0, 0.8)';
+        'rgba(0, 255, 100, 0.9)' : 'rgba(255, 200, 0, 0.9)';
     fastplayBtn.textContent = fastplayEnabled ? TERMS.fastOn : TERMS.fastOff;
 };
-document.body.appendChild(fastplayBtn);
+// Add fast button to bet panel
+const betPanel = document.querySelector('.bet-ui');
+if (betPanel) {
+    betPanel.appendChild(fastplayBtn);
+} else {
+    // Fallback: create a container in the bet panel area
+    console.warn('Bet panel not found, fastplay button appended to body');
+    document.body.appendChild(fastplayBtn);
+}
 // CSS for mini-player mode and animations
 const complianceStyles = document.createElement('style');
 complianceStyles.textContent = `
