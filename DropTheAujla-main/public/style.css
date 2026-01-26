@@ -44,11 +44,17 @@ body {
 }
 
 #startScreen h1 {
+  position: absolute;
+  bottom: 15%;
+  left: 50%;
+  transform: translateX(-50%);
   color: white;
   font-family: 'Luckiest Guy', cursive;
-  font-size: 4rem;
+  font-size: 3rem;
+  font-weight: 400;
   text-align: center;
   text-shadow: 0 0 20px #ffd700;
+  letter-spacing: 2px;
 }
 
 @media (max-width: 1024px) {
@@ -539,10 +545,11 @@ body {
 
 /******** BET PANEL ********/
 .bet-ui {
-  position: absolute;
+  position: fixed;
   bottom: 0;
-  left: 0;
-  width: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 100vw;
   display: flex;
   align-items: center;
   justify-content: center;

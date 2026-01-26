@@ -143,7 +143,8 @@ let visualEarnings = 0;             // LEGACY: Alias for visualScore (backward c
 let abstractEvents = [];            // Abstract events: collectible, multiplier, end
 let currentEventIndex = 0;
 let roundStartTime = 0;
-// REMOVED: spawnData - Frontend spawns cosmetically, not from backend positions
+// spawnData - null means use fallback random spawning (frontend cosmetic only)
+let spawnData = null;
 let backendFinalPayout = 0;         // Authoritative payout from backend (RGS units)
 let backendBlackHoleTriggered = false;
 let backendBlackHoleMultiplier = 1;
@@ -162,6 +163,42 @@ let scoreAnimationDuration = 5000;  // 5 seconds to animate to final score
 let fallStartY = 0;
 let isZeroPayoutRound = false;
 let hasTriggeredBlackHole = false; // Prevent duplicate triggers
+
+// ╔════════════════════════════════════════════════════════════════════════════╗
+// ║ OBLIGATION-BASED SYSTEM: Progress tracking and event scheduling            ║
+// ║ Backend events are OBLIGATIONS the frontend must fulfill visually          ║
+// ╚════════════════════════════════════════════════════════════════════════════╝
+let targetDistance = 15000;        // Total fall distance to complete round
+let currentProgress = 0;           // 0.0 to 1.0 based on fall distance
+let eventSchedule = {
+    collectibles: [],              // [{ progress: 0.25, fulfilled: false, spawned: false }]
+    multiplier: null               // { progress: 0.65, value: M, fulfilled: false, spawned: false }
+};
+
+// Cloud Zone Configuration
+const CLOUD_ZONES = {
+    CHAOS: { maxProgress: 0.60, restitution: 0.5, friction: 0.1, biasX: 0, density: 1.0 },
+    GUIDED: { maxProgress: 0.85, restitution: 0.3, friction: 0.15, biasX: 0.1, density: 1.5 },
+    TERMINAL: { maxProgress: 1.0, restitution: 0.1, friction: 0.3, biasX: 0.3, density: 2.5 }
+};
+
+// Get current cloud zone behavior based on progress
+function getCloudBehavior() {
+    if (currentProgress < CLOUD_ZONES.CHAOS.maxProgress) {
+        return CLOUD_ZONES.CHAOS;
+    } else if (currentProgress < CLOUD_ZONES.GUIDED.maxProgress) {
+        return CLOUD_ZONES.GUIDED;
+    }
+    return CLOUD_ZONES.TERMINAL;
+}
+
+// Update progress based on fall distance
+function updateProgress() {
+    if (!fallStarted || isZeroPayoutRound) return;
+    const fallDistance = Math.max(0, camY - fallStartY);
+    currentProgress = Math.min(fallDistance / targetDistance, 1.0);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // SECTION 4: RGS API CLIENT (LOCAL BACKEND FOR DEVELOPMENT)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -366,8 +403,9 @@ function createRoundData(response) {
 
 function initializeRoundFromEvents() {
     // Called at round start to set up the game based on abstract events
+    // This is the OBLIGATION-BASED initialization
 
-    // Reset state
+    // Reset basic state
     fallStartY = camY;
     maxDepthReached = camY;
     hasTriggeredBlackHole = false;
@@ -375,33 +413,80 @@ function initializeRoundFromEvents() {
     roundEnded = false;
     gameFrozen = false;
     stuckFrameCount = 0;
+    stuckCheckStartTime = 0;
+    zeroPayoutFallStartTime = 0;
     lastY = camY;
     visualScore = 0;
     visualEarnings = 0;
     scoreAnimationStartTime = performance.now();
+    currentProgress = 0;
 
-    // Clear and spawn world COSMETICALLY (not from backend positions)
-    clearWorld();
-    spawnWorld();  // Frontend decides positions
+    // ╔════════════════════════════════════════════════════════════════════════╗
+    // ║ DERIVE TARGET DISTANCE FROM PAYOUT                                      ║
+    // ║ Higher payout = longer fall = more distance                             ║
+    // ╚════════════════════════════════════════════════════════════════════════╝
+    // Base distance: 8000, scales with payout up to max of 18000
+    const payoutRatio = Math.min(backendFinalPayoutDisplay / 100, 1); // 0-1 based on max 100x bet
+    targetDistance = 8000 + (payoutRatio * 10000);
 
-    // Spawn collectibles based on count from abstract events
+    // For zero payout, short fall
+    if (isZeroPayoutRound || backendFinalPayoutDisplay === 0) {
+        targetDistance = 2000;  // Very short fall before death
+    }
+
+    // ╔════════════════════════════════════════════════════════════════════════╗
+    // ║ DERIVE EVENT SCHEDULE (Progress-Based)                                  ║
+    // ║ Convert abstract events → progress windows                              ║
+    // ╚════════════════════════════════════════════════════════════════════════╝
+    eventSchedule = {
+        collectibles: [],
+        multiplier: null
+    };
+
+    // Schedule collectibles across 0.15 to 0.55 progress range
     if (backendCollectibleCount > 0) {
-        spawnCollectibles(backendCollectibleCount);
+        const collectibleSpacing = 0.4 / Math.max(backendCollectibleCount, 1);
+        for (let i = 0; i < backendCollectibleCount; i++) {
+            eventSchedule.collectibles.push({
+                index: i,
+                progress: 0.15 + (i * collectibleSpacing),
+                fulfilled: false,
+                spawned: false,
+                spawnedItems: []  // Track spawned DOM elements
+            });
+        }
     }
 
-    // Spawn black hole if multiplier event exists
+    // Schedule multiplier at 0.65 progress if triggered
     if (backendBlackHoleTriggered) {
-        spawnBlackHoles(1);  // Frontend decides position
+        eventSchedule.multiplier = {
+            progress: 0.65,
+            value: backendBlackHoleMultiplier,
+            fulfilled: false,
+            spawned: false
+        };
     }
 
-    // Spawn blocking geometry at a terminal depth (frontend decides)
-    const terminalDepthY = 18000 + Math.random() * 5000;  // Random terminal depth
-    spawnBlockingFormation(terminalDepthY);
+    console.log('[OBLIGATION] Event schedule derived:', {
+        targetDistance,
+        collectibles: eventSchedule.collectibles.length,
+        multiplierProgress: eventSchedule.multiplier?.progress || 'none'
+    });
+
+    // Clear and spawn base world (clouds, ground entities)
+    clearWorld();
+    spawnWorld();  // Base clouds and environment
+
+    // DON'T spawn collectibles or black holes yet - they spawn based on progress
+    // Spawn terminal blocking formation at 95% progress
+    const terminalY = fallStartY + (targetDistance * 0.95);
+    spawnBlockingFormation(terminalY);
 
     console.log('[STAKE-COMPLIANT] Round initialized:',
         'Payout:', backendFinalPayoutDisplay,
         'Collectibles:', backendCollectibleCount,
-        'Has bonus:', backendBlackHoleTriggered);
+        'Has bonus:', backendBlackHoleTriggered,
+        'Target distance:', targetDistance);
 }
 
 // ╔════════════════════════════════════════════════════════════════════════════╗
@@ -464,21 +549,211 @@ function handleAbstractEvent(event) {
 }
 
 function triggerQuickLoss() {
-    // STAKE-COMPLIANT: Zero payout rounds end quickly
+    // STAKE-COMPLIANT: Zero payout rounds - let physics make character fall first
+    // The actual explosion is triggered by checkNaturalGameEnd() after 1 second of falling
     isZeroPayoutRound = true;
     visualScore = 0;
     visualEarnings = 0;
     updateScoreDisplay();
 
-    // Short fall animation (1 second), then explosion
-    setTimeout(() => {
-        triggerExplosion();
-        setTimeout(() => {
-            cleanupExplosion();
-            processRoundEnd();
-        }, 2500);
-    }, 1000);
+    // Give the character some initial velocity to start falling
+    // Physics loop will take over from here
+    velY = 5;  // Initial push to start falling
+
+    // Don't trigger explosion here - let checkNaturalGameEnd() handle it
+    // That function monitors the fall and triggers explosion after 1 second
+    console.log('[ZERO PAYOUT] Quick loss initiated - waiting for 1 second fall before explosion');
 }
+
+// ╔════════════════════════════════════════════════════════════════════════════╗
+// ║ EVENT TIMELINE PROCESSOR: Progress-based event spawning and guidance       ║
+// ║ This is the core of the OBLIGATION-BASED system                            ║
+// ╚════════════════════════════════════════════════════════════════════════════╝
+let progressivePayoutEnabled = true;
+
+function processEventTimeline() {
+    // Update progress based on fall distance
+    updateProgress();
+
+    // Update score animation
+    updateScoreAnimation();
+
+    // Skip event processing for zero payout rounds
+    if (isZeroPayoutRound) return;
+
+    // Process scheduled collectibles
+    processScheduledCollectibles();
+
+    // Process scheduled multiplier (black hole)
+    processScheduledMultiplier();
+
+    // Apply cloud zone behavior (subtle guidance)
+    applyCloudZoneBehavior();
+
+    // Safety nets
+    checkEventSafetyNets();
+}
+
+// Spawn collectibles when reaching their progress windows
+function processScheduledCollectibles() {
+    const playerX = camX + PLAYER_X;
+    const playerY = camY + PLAYER_Y;
+
+    for (const scheduled of eventSchedule.collectibles) {
+        if (scheduled.fulfilled) continue;
+
+        // Spawn collectible when approaching its progress window
+        if (!scheduled.spawned && currentProgress >= scheduled.progress - 0.05) {
+            spawnScheduledCollectible(scheduled, playerX, playerY);
+            scheduled.spawned = true;
+        }
+
+        // Check if player collected any of the spawned items
+        if (scheduled.spawned && checkCollectiblePickup(scheduled)) {
+            scheduled.fulfilled = true;
+            console.log('[OBLIGATION] Collectible fulfilled at progress:', currentProgress.toFixed(2));
+        }
+    }
+}
+
+// Spawn a collectible in the player's path
+function spawnScheduledCollectible(scheduled, playerX, playerY) {
+    const spawnY = fallStartY + (targetDistance * scheduled.progress);
+
+    // Spawn corridor: player X ± 300, spawn Y ± 100
+    const corridorWidth = 300;
+    const xOffset = (Math.random() - 0.5) * corridorWidth;
+    const yOffset = (Math.random() - 0.5) * 100;
+
+    const x = playerX + xOffset;
+    const y = spawnY + yOffset;
+
+    // Create the collectible element
+    const el = document.createElement("div");
+    el.className = "collectible " + (Math.random() < 0.4 ? "chain" : "music");
+    el.style.left = (x - 85) + "px";
+    el.style.top = (y - 85) + "px";
+    world.appendChild(el);
+
+    const obj = { x, y, el, isScheduled: true };
+    collectibles.push(obj);
+    (el.classList.contains("chain") ? chains : notes).push(obj);
+    scheduled.spawnedItems.push(obj);
+
+    console.log('[OBLIGATION] Spawned collectible at progress:', scheduled.progress.toFixed(2));
+}
+
+// Check if player picked up a scheduled collectible
+function checkCollectiblePickup(scheduled) {
+    const playerX = camX + PLAYER_X;
+    const playerY = camY + PLAYER_Y;
+    const pickupRadius = 120;
+
+    for (const item of scheduled.spawnedItems) {
+        if (!item.el.parentNode) continue;  // Already removed
+        const dx = playerX - item.x;
+        const dy = playerY - item.y;
+        if (dx * dx + dy * dy < pickupRadius * pickupRadius) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Process scheduled multiplier (black hole)
+function processScheduledMultiplier() {
+    if (!eventSchedule.multiplier || eventSchedule.multiplier.fulfilled) return;
+
+    const scheduled = eventSchedule.multiplier;
+    const playerX = camX + PLAYER_X;
+    const playerY = camY + PLAYER_Y;
+
+    // Spawn black hole when approaching its progress window
+    if (!scheduled.spawned && currentProgress >= scheduled.progress - 0.08) {
+        spawnScheduledBlackHole(scheduled, playerX);
+        scheduled.spawned = true;
+    }
+
+    // Check for collision (handled by existing checkBlackHoleCollision)
+    if (scheduled.spawned && hasTriggeredBlackHole) {
+        scheduled.fulfilled = true;
+        console.log('[OBLIGATION] Multiplier fulfilled at progress:', currentProgress.toFixed(2));
+    }
+}
+
+// Spawn black hole in player's path
+function spawnScheduledBlackHole(scheduled, playerX) {
+    const spawnY = fallStartY + (targetDistance * scheduled.progress);
+
+    // Narrow corridor: player X ± 200
+    const x = playerX + (Math.random() - 0.5) * 200 - BH_SIZE / 2;
+    const y = spawnY;
+
+    const el = document.createElement("div");
+    el.className = "black-hole";
+    el.style.width = BH_SIZE + "px";
+    el.style.height = BH_SIZE + "px";
+    el.style.background = `url('items/black_hole_1.png') no-repeat center/contain`;
+    el.style.left = x + "px";
+    el.style.top = y + "px";
+    world.appendChild(el);
+
+    blackHoles.push({
+        x, y, el,
+        rotation: 0,
+        willTrigger: true,  // This is the guaranteed trigger black hole
+        isScheduled: true
+    });
+
+    console.log('[OBLIGATION] Spawned black hole at progress:', scheduled.progress.toFixed(2));
+}
+
+// Apply cloud zone behavior - subtle velocity bias
+function applyCloudZoneBehavior() {
+    const zone = getCloudBehavior();
+
+    // In GUIDED and TERMINAL zones, apply horizontal centering bias
+    if (zone.biasX > 0) {
+        const centerX = 8000;  // World center
+        const playerX = camX + PLAYER_X;
+        const distFromCenter = centerX - playerX;
+
+        // Gentle bias toward center (max 0.5 px/frame)
+        velX += Math.sign(distFromCenter) * Math.min(Math.abs(distFromCenter) * 0.001, zone.biasX);
+    }
+
+    // In TERMINAL zone, increase friction to slow down
+    if (zone === CLOUD_ZONES.TERMINAL) {
+        velX *= (1 - zone.friction * 0.1);
+        velY *= 0.995;  // Slight vertical slowdown
+    }
+}
+
+// Safety nets - ensure obligations are fulfilled
+function checkEventSafetyNets() {
+    // Safety: Auto-fulfill collectibles if progress passes their window
+    for (const scheduled of eventSchedule.collectibles) {
+        if (!scheduled.fulfilled && currentProgress > scheduled.progress + 0.15) {
+            scheduled.fulfilled = true;
+            console.log('[SAFETY] Auto-fulfilled collectible at progress:', currentProgress.toFixed(2));
+            // Visual feedback (optional): show a quick pickup animation
+        }
+    }
+
+    // Safety: Force-trigger multiplier if overshot
+    if (eventSchedule.multiplier && !eventSchedule.multiplier.fulfilled) {
+        if (currentProgress > eventSchedule.multiplier.progress + 0.15) {
+            // Force trigger the bonus
+            if (!hasTriggeredBlackHole && blackHoles.length > 0) {
+                console.log('[SAFETY] Force-triggering multiplier at progress:', currentProgress.toFixed(2));
+                hasTriggeredBlackHole = true;
+                triggerBonusEnter(eventSchedule.multiplier.value);
+                eventSchedule.multiplier.fulfilled = true;
+            }
+        }
+    }
+}
+
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║ PROGRESSIVE PAYOUT: Score increases smoothly as character falls            ║
 // ║ STAKE-COMPLIANT: Physics controls WHEN score animates, backend controls    ║
@@ -661,26 +936,32 @@ function updateInvertedScore() {
 // ║ NATURAL GAME END: Character physically stopped (stuck) or reached ground   ║
 // ╚════════════════════════════════════════════════════════════════════════════╝
 let zeroPayoutFallStartTime = 0; // Track when zero payout fall started
+let stuckCheckStartTime = 0;  // Track when character first became slow
 
 function checkNaturalGameEnd() {
     if (naturalEndTriggered || inBlackHole || roundEnded) return;
-    // 1. Run collision check against blocking clouds
-    const isColliding = checkBlockingFormationCollision();
-    // 2. ZERO PAYOUT: Fall for 1 second, THEN trigger explosion
-    if (isZeroPayoutRound && camY > fallStartY + 2000) {
-        // Start tracking fall time when crossing threshold
+
+    // 1. ZERO PAYOUT: Fall briefly, THEN trigger explosion
+    if (isZeroPayoutRound) {
+        // Start tracking fall time immediately when round starts
         if (zeroPayoutFallStartTime === 0) {
             zeroPayoutFallStartTime = performance.now();
             visualScore = 0;
             visualEarnings = 0;
-            console.log('[ZERO PAYOUT] Fall started - waiting 1 second before explosion');
+            console.log('[ZERO PAYOUT] Fall started - waiting 0.5 seconds before explosion');
         }
 
-        // Wait 1 second (1000ms) of falling before triggering explosion
+        // Wait 0.5 seconds of falling before triggering explosion
         const fallDuration = performance.now() - zeroPayoutFallStartTime;
-        if (fallDuration >= 1000) {
+        if (fallDuration >= 500) {
             naturalEndTriggered = true;
-            console.log('[ZERO PAYOUT] 1 second elapsed - triggering kill animation');
+            console.log('[ZERO PAYOUT] Time elapsed - triggering kill animation');
+            // Freeze character AND world at current position
+            gameFrozen = true;
+            velX = 0;
+            velY = 0;
+            angVel = 0;
+            isZeroPayoutExplosion = true;
             triggerExplosion();
             setTimeout(() => {
                 cleanupExplosion();
@@ -690,25 +971,52 @@ function checkNaturalGameEnd() {
         }
         return;
     }
-    // 3. STUCK DETECTION: If colliding and velocity is very low, count frames
-    if (isColliding && Math.abs(velY) < 3 && Math.abs(velX) < 3) {
-        stuckFrameCount++;
-    } else {
-        stuckFrameCount = 0;
-    }
-    // 4. If stuck for > 15 frames (approx 0.25s), round is over
-    // This is the "Natural Loss" - physics has prevented further movement
-    if (stuckFrameCount > 15) {
-        console.log('[PHYSICS] Character stuck - Natural End detected');
+
+    // 2. PROGRESS-BASED END: When progress reaches 1.0, end the round
+    if (currentProgress >= 1.0) {
+        console.log('[PROGRESS] Round complete - progress reached 1.0');
         roundEnded = true;
         naturalEndTriggered = true;
-        // Ensure final score matches exactly what we calculated based on depth
-        // (Visual earnings are already updated by updateInvertedScore)
-        // Small delay before showing end screen for natural feel
-        setTimeout(() => processRoundEnd(), 500);
+        // STAKE-COMPLIANT: Snap to backend payout
+        visualScore = backendFinalPayoutDisplay;
+        visualEarnings = visualScore;
+        updateScoreDisplay();
+        setTimeout(() => processRoundEnd(), 300);
         return;
     }
-    // 5. GROUND: Final fallback - end when reaching ground
+
+    // 3. Run collision check against blocking clouds
+    const isCollidingWithBlocking = checkBlockingFormationCollision();
+
+    // 3. STUCK DETECTION: If velocity has been very low for a while, end the round
+    // This works regardless of what stopped the character (regular clouds, blocking clouds, etc.)
+    const isMovingSlowly = Math.abs(velY) < 2 && Math.abs(velX) < 2 && fallStarted;
+
+    if (isMovingSlowly) {
+        if (stuckCheckStartTime === 0) {
+            stuckCheckStartTime = performance.now();
+        }
+
+        // If stuck for more than 1 second, end the round
+        const stuckDuration = performance.now() - stuckCheckStartTime;
+        if (stuckDuration > 1000) {
+            console.log('[PHYSICS] Character stuck for 1 second - Natural End detected');
+            roundEnded = true;
+            naturalEndTriggered = true;
+            // STAKE-COMPLIANT: Snap to backend payout
+            visualScore = backendFinalPayoutDisplay;
+            visualEarnings = visualScore;
+            updateScoreDisplay();
+            stuckCheckStartTime = 0;
+            setTimeout(() => processRoundEnd(), 500);
+            return;
+        }
+    } else {
+        // Reset stuck timer if moving again
+        stuckCheckStartTime = 0;
+    }
+
+    // 4. GROUND: Final fallback - end when reaching ground
     if (camY >= GROUND_Y - PLAYER_H - 100) {
         console.log('[PHYSICS] Ground reached');
         naturalEndTriggered = true;
@@ -725,14 +1033,8 @@ function processRoundEnd() {
     // Clean up blocking clouds
     stoppingClouds.forEach(c => { if (c.el) c.el.remove(); });
     stoppingClouds = [];
-    // Find and trigger the round_end event from timeline
-    for (let i = currentEventIndex; i < eventTimeline.length; i++) {
-        if (eventTimeline[i].type === 'round_end') {
-            handleRoundEndEvent(eventTimeline[i].value);
-            return;
-        }
-    }
-    // Fallback if no round_end event found - use backend payout
+
+    // Use backend payout directly (obligation-based system)
     handleRoundEndEvent(backendFinalPayoutDisplay);
 }
 function animateEarningsTo(targetValue) {
@@ -802,7 +1104,11 @@ const BODY_PARTS = [
 ];
 let explosionParts = [];
 let explosionActive = false;
+let explosionTriggered = false;
+let isZeroPayoutExplosion = false;
 function triggerExplosion() {
+    if (explosionTriggered) return; // Prevent multiple triggers
+    explosionTriggered = true;
     explosionActive = true;
     explosionParts = [];
     // Hide the main sprite
@@ -914,9 +1220,14 @@ function cleanupExplosion() {
     // Remove lost message
     const lostMsg = document.getElementById("lostMessage");
     if (lostMsg) lostMsg.remove();
-    // Restore sprite
-    const sprite = document.getElementById("sprite");
-    if (sprite) sprite.style.display = "block";
+
+    // Keep sprite HIDDEN until game resets - don't restore it here
+    // sprite.style.display will be restored in resetGameWorld()
+
+    // Immediately complete round and reset game
+    completeRound().then(() => {
+        // completeRound will call resetGameWorld which shows the sprite again
+    });
 }
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║ FIX #1: handleRoundEndEvent - Triggers explosion on loss (payout = 0)      ║
@@ -1121,14 +1432,14 @@ async function completeRound() {
         // Show end screen (auto-dismiss)
         runOverEl.innerHTML = `${TERMS.roundOver}<br>${TERMS.totalWinnings}: ${TERMS.currency}${payoutDisplay.toFixed(2)}`;
         runOverEl.style.display = "block";
-        // Auto-dismiss after 3.5 seconds
+        // Auto-dismiss after 3.5 seconds - THEN enable betting
         setTimeout(() => {
             runOverEl.style.display = "none";
             resetGameWorld();
+            gameSession.state = GameState.READY;  // Only set READY after reset
             unlockBetUI();
         }, 3500);
         gameSession.currentRound = null;
-        gameSession.state = GameState.READY;
         gameSession.retryCount = 0;
         updateBalanceUI();
         // Note: Now user-triggered dismiss replaces timeout
@@ -1605,21 +1916,33 @@ function startGame() {
 function resetGameWorld() {
     clearWorld();
     camX = camY = velX = velY = angle = angVel = 0;
+
+    // Reset score to 0 and update display
+    visualScore = 0;
     visualEarnings = 0;
+    updateScoreDisplay();
+
     lastCamY = 0;
     fallStarted = false;
     betPlaced = false;
     betResolved = false;
     forceLandingActive = false;
     awaitingRoundEnd = false;
-    eventTimeline = [];
     currentEventIndex = 0;
-    gameFrozen = false; // Unfreeze game for next round
-    zeroPayoutFallStartTime = 0; // Reset zero payout fall timer
+    gameFrozen = false;
+    zeroPayoutFallStartTime = 0;
+    isZeroPayoutRound = false;  // Reset zero payout flag
+    currentProgress = 0;  // Reset progress
+    explosionTriggered = false;  // Reset explosion flag
+
     hideWaitingIndicator();
     spawnWorld();
     spawnCollectibles(PRESET_SPAWN_COUNT);
     silverjetWrap.style.display = "block";
+
+    // Restore sprite visibility after explosion/kill
+    const sprite = document.getElementById("sprite");
+    if (sprite) sprite.style.display = "block";
 }
 function clearWorld() {
     [...collectibles, ...chains, ...notes].forEach(c => c.el.remove());
@@ -2002,12 +2325,18 @@ function getPlayerColliders() {
 const MASS = 2.0;
 function restitutionFromSpeed(v) {
     const s = Math.min(Math.abs(v), 40);
-    if (s < 1) return 0;
-    if (s < 8) return 0.1;
-    if (s < 14) return 0.3;
-    if (s < 22) return 0.5;
-    if (s < 30) return 0.6;
-    return 0.5;
+    let baseRestitution;
+
+    if (s < 1) baseRestitution = 0;
+    else if (s < 8) baseRestitution = 0.1;
+    else if (s < 14) baseRestitution = 0.3;
+    else if (s < 22) baseRestitution = 0.5;
+    else if (s < 30) baseRestitution = 0.6;
+    else baseRestitution = 0.5;
+
+    // Apply zone-based restitution modifier
+    const zone = getCloudBehavior();
+    return baseRestitution * zone.restitution * 2;  // Zone restitution scales 0.1-0.5
 }
 // Recycling functions
 function recycleClouds() {
@@ -2432,13 +2761,21 @@ function update() {
         showFlipText(angleAccumulator > 0 ? 'backflip' : 'frontflip');
         angleAccumulator = 0;
     }
-    // Collectible visual pickup
-    function checkVisualPickup(arr) {
+    // Collectible visual pickup - shows bet-proportional values
+    function checkVisualPickup(arr, collectibleType) {
         const playerColliders = getPlayerColliders();
         for (let i = arr.length - 1; i >= 0; i--) {
             const c = arr[i];
             for (const pc of playerColliders) {
                 if ((pc.x - c.x) ** 2 + (pc.y - c.y) ** 2 < (pc.r + 85) ** 2) {
+                    // Calculate bet-proportional value
+                    const betDisplay = backendBetRGS > 0 ? fromRGSAmount(backendBetRGS) : 1;
+                    const valueMultiplier = collectibleType === 'nuke' ? 0.10 : 0.05;
+                    const collectibleValue = betDisplay * valueMultiplier;
+
+                    // Show pickup animation with proportional value
+                    showCollectibleAnimation({ x: c.x, y: c.y }, collectibleValue);
+
                     c.el.remove();
                     arr.splice(i, 1);
                     break;
@@ -2446,8 +2783,8 @@ function update() {
             }
         }
     }
-    checkVisualPickup(chains);
-    checkVisualPickup(notes);
+    checkVisualPickup(chains, 'nuke');   // chains use nuke.png
+    checkVisualPickup(notes, 'notes');   // notes use notes.png
     // ╔════════════════════════════════════════════════════════════════════════╗
     // ║ FIX #1: Ground landing does NOT complete round                         ║
     // ║ It only enters waiting state - round_end comes from RGS                ║
@@ -2531,12 +2868,17 @@ function initLoadingSystem() {
         const remaining = Math.max(0, minTime - elapsed);
 
         setTimeout(() => {
+            // Show start screen FIRST (behind the overlay)
+            if (startScreen) {
+                startScreen.style.display = "flex";
+            }
+
             const overlay = document.getElementById("loadingOverlay");
             if (overlay) {
                 overlay.style.opacity = "0"; // Fade out
                 setTimeout(() => {
                     overlay.style.display = "none"; // Remove from DOM
-                    playGameIntro(); // Start the next phase
+                    playGameIntro(); // Setup start screen handlers
                 }, 500); // Wait for transition
             }
         }, remaining);
@@ -2577,21 +2919,8 @@ function initLoadingSystem() {
 }
 
 function playGameIntro() {
-    if (!gameIntroVideo) {
-        onGameIntroEnd();
-        return;
-    }
-    gameIntroVideo.style.display = "block";
-    const playPromise = gameIntroVideo.play();
-
-    if (playPromise !== undefined) {
-        playPromise.catch(error => {
-            console.log("Auto-play prevented (game intro). Showing start screen.");
-            onGameIntroEnd();
-        });
-    }
-
-    gameIntroVideo.onended = onGameIntroEnd;
+    // Skip intro video - go directly to start screen
+    onGameIntroEnd();
 }
 
 function onGameIntroEnd() {

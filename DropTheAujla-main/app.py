@@ -92,35 +92,35 @@ def calculate_outcome(rng_value: float, bet: int, mode: str = 'normal') -> dict:
         black_hole_multiplier = 1.0
 
     elif rng_value < 0.75:
-        # SMALL WIN: 0.5x to 2x, 1-2 collectibles
+        # SMALL WIN: 0.5x to 2x, 2-3 collectibles (increased)
         normalized = (rng_value - 0.40) / 0.35
         multiplier = 0.5 + normalized * 1.5
-        collectible_count = 1 + int(normalized > 0.5)  # 1-2 items
+        collectible_count = 2 + int(normalized > 0.5)  # 2-3 items
         black_hole_triggered = False
         black_hole_multiplier = 1.0
 
     elif rng_value < 0.92:
-        # MEDIUM WIN: 2x to 10x, 2-3 collectibles
+        # MEDIUM WIN: 2x to 10x, 3-4 collectibles (increased)
         normalized = (rng_value - 0.75) / 0.17
         multiplier = 2.0 + normalized * 8.0
-        collectible_count = 2 + int(normalized > 0.5)  # 2-3 items
+        collectible_count = 3 + int(normalized > 0.5)  # 3-4 items
         black_hole_triggered = seeded_random(rng_value, 100) < 0.3
         black_hole_multiplier = 1.5 + seeded_random(rng_value, 101) * 1.5 if black_hole_triggered else 1.0
 
     elif rng_value < 0.99:
-        # BIG WIN: 10x to 100x, 3-4 collectibles
+        # BIG WIN: 10x to 100x, 4-5 collectibles (increased)
         normalized = (rng_value - 0.92) / 0.07
         multiplier = 10.0 + normalized * 90.0
-        collectible_count = 3 + int(normalized > 0.5)  # 3-4 items
+        collectible_count = 4 + int(normalized > 0.5)  # 4-5 items
         black_hole_triggered = seeded_random(rng_value, 100) < 0.6
         black_hole_multiplier = 2.0 + seeded_random(rng_value, 101) * 3.0 if black_hole_triggered else 1.0
 
     else:
-        # JACKPOT: 100x to 5000x (rare), 4-5 collectibles
+        # JACKPOT: 100x to 5000x (rare), 5-6 collectibles (increased)
         normalized = (rng_value - 0.99) / 0.01
         multiplier = 100.0 + normalized * (MAX_WIN_MULTIPLIER - 100)
         multiplier = min(multiplier, MAX_WIN_MULTIPLIER)
-        collectible_count = 4 + int(normalized > 0.5)  # 4-5 items
+        collectible_count = 5 + int(normalized > 0.5)  # 5-6 items
         black_hole_triggered = True
         black_hole_multiplier = 3.0 + seeded_random(rng_value, 101) * 7.0
 
