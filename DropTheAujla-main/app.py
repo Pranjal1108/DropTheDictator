@@ -1,7 +1,11 @@
 """
-STAKE ENGINE COMPLIANT BACKEND - v3.0 (WORLD PLAN ARCHITECTURE)
-Backend now sends a complete WORLD PLAN, not just an outcome.
-Frontend becomes a "dumb physics executor" inside a pre-shaped world.
+STAKE ENGINE COMPLIANT BACKEND - v4.0 (ABSTRACT EVENTS ONLY)
+Backend sends ONLY abstract events, NO geometry, NO positions.
+Frontend is the "storyteller" that creates the visual world.
+
+This architecture follows Stake's core principle:
+- Backend decides MONEY (RNG → payout → events)
+- Frontend decides ILLUSION (events → visuals → animation)
 """
 
 from flask import Flask, request, jsonify
@@ -10,9 +14,10 @@ import secrets
 import hashlib
 import hmac
 import time
-import math
 
-app = Flask(__name__)
+app = Flask(__name__,
+            static_folder='public',
+            static_url_path='')
 CORS(app)
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -21,24 +26,10 @@ CORS(app)
 
 RTP = 0.965  # 96.5% RTP
 MAX_WIN_MULTIPLIER = 5000
-MIN_BET = 1_000_000      # 1.00 in micro-units
-MAX_BET = 100_000_000    # 100.00 in micro-units
-STEP_BET = 1_000_000     # 1.00 step
-
-# World constants (must match frontend)
-WORLD_HEIGHT = 20000
-GROUND_Y = 19300
-DEADZONE = 1500
-SCREEN_WIDTH = 1920
-SCREEN_HEIGHT = 1200
-
-# Corridor constraints
-CORRIDOR_CENTER = 960  # Center of screen
-CORRIDOR_WIDTH = 800   # Allowed horizontal movement range
-
-# Cloud dimensions (must match frontend)
-CLOUD1_W = 320 * 1.7  # 544
-CLOUD1_H = 160 * 1.7  # 272
+MONETARY_PRECISION = 1_000_000  # 1 unit = 1.00 in display currency
+MIN_BET = MONETARY_PRECISION    # 1.00 in micro-units
+MAX_BET = 100 * MONETARY_PRECISION  # 100.00 in micro-units
+STEP_BET = MONETARY_PRECISION   # 1.00 step
 
 # Server secret for provably fair RNG
 SERVER_SECRET = secrets.token_hex(32)
@@ -80,57 +71,56 @@ def seeded_random(base_rng: float, index: int) -> float:
     return int_value / (2**32)
 
 # ═══════════════════════════════════════════════════════════════════════════
-# PAYOUT CALCULATION (RTP-COMPLIANT)
+# PAYOUT CALCULATION (RTP-COMPLIANT) - NO GEOMETRY, JUST MATH
 # ═══════════════════════════════════════════════════════════════════════════
 
 def calculate_outcome(rng_value: float, bet: int, mode: str = 'normal') -> dict:
     """
     Calculate game outcome from RNG value.
-    Returns payout multiplier and terminal depth.
+    Returns payout multiplier and abstract event data.
+    
+    NOTE: No terminal_depth, no positions, no geometry.
+    Frontend decides how to visualize this outcome.
     """
 
     # Loss probability: ~40% for balanced RTP
     if rng_value < 0.40:
-        # LOSS: Early terminal depth
+        # LOSS: No collectibles, immediate end
         multiplier = 0.0
-        depth_progress = 0.05 + (rng_value / 0.40) * 0.15  # 5-20% of fall
-        terminal_depth = DEADZONE + int(depth_progress * (GROUND_Y - DEADZONE - 1000))
+        collectible_count = 0
         black_hole_triggered = False
         black_hole_multiplier = 1.0
 
     elif rng_value < 0.75:
-        # SMALL WIN: 0.5x to 2x
+        # SMALL WIN: 0.5x to 2x, 1-2 collectibles
         normalized = (rng_value - 0.40) / 0.35
         multiplier = 0.5 + normalized * 1.5
-        depth_progress = 0.3 + normalized * 0.4  # 30-70% of fall
-        terminal_depth = DEADZONE + int(depth_progress * (GROUND_Y - DEADZONE - 500))
+        collectible_count = 1 + int(normalized > 0.5)  # 1-2 items
         black_hole_triggered = False
         black_hole_multiplier = 1.0
 
     elif rng_value < 0.92:
-        # MEDIUM WIN: 2x to 10x
+        # MEDIUM WIN: 2x to 10x, 2-3 collectibles
         normalized = (rng_value - 0.75) / 0.17
         multiplier = 2.0 + normalized * 8.0
-        depth_progress = 0.7 + normalized * 0.25  # 70-95% of fall
-        terminal_depth = DEADZONE + int(depth_progress * (GROUND_Y - DEADZONE - 300))
+        collectible_count = 2 + int(normalized > 0.5)  # 2-3 items
         black_hole_triggered = seeded_random(rng_value, 100) < 0.3
         black_hole_multiplier = 1.5 + seeded_random(rng_value, 101) * 1.5 if black_hole_triggered else 1.0
 
     elif rng_value < 0.99:
-        # BIG WIN: 10x to 100x
+        # BIG WIN: 10x to 100x, 3-4 collectibles
         normalized = (rng_value - 0.92) / 0.07
         multiplier = 10.0 + normalized * 90.0
-        depth_progress = 0.95 + normalized * 0.04  # 95-99% of fall
-        terminal_depth = GROUND_Y - 200
+        collectible_count = 3 + int(normalized > 0.5)  # 3-4 items
         black_hole_triggered = seeded_random(rng_value, 100) < 0.6
         black_hole_multiplier = 2.0 + seeded_random(rng_value, 101) * 3.0 if black_hole_triggered else 1.0
 
     else:
-        # JACKPOT: 100x to 5000x (rare)
+        # JACKPOT: 100x to 5000x (rare), 4-5 collectibles
         normalized = (rng_value - 0.99) / 0.01
         multiplier = 100.0 + normalized * (MAX_WIN_MULTIPLIER - 100)
         multiplier = min(multiplier, MAX_WIN_MULTIPLIER)
-        terminal_depth = GROUND_Y - 100  # Almost to ground
+        collectible_count = 4 + int(normalized > 0.5)  # 4-5 items
         black_hole_triggered = True
         black_hole_multiplier = 3.0 + seeded_random(rng_value, 101) * 7.0
 
@@ -147,506 +137,71 @@ def calculate_outcome(rng_value: float, bet: int, mode: str = 'normal') -> dict:
     return {
         'multiplier': multiplier,
         'payout': payout,
-        'terminal_depth_y': terminal_depth,
+        'collectible_count': collectible_count,
         'black_hole_triggered': black_hole_triggered,
         'black_hole_multiplier': black_hole_multiplier,
         'is_loss': multiplier == 0
     }
 
 # ═══════════════════════════════════════════════════════════════════════════
-# PAYOUT EVENT DECOMPOSITION - FORCED INTERACTIONS
+# ABSTRACT EVENT GENERATION - NO GEOMETRY, NO POSITIONS
 # ═══════════════════════════════════════════════════════════════════════════
 
-def decompose_payout_to_events(outcome: dict, rng_value: float) -> list:
+def generate_abstract_events(outcome: dict) -> list:
     """
-    Decompose final payout into individual forced events.
-    Each event represents a mandatory interaction the player MUST hit.
+    Generate abstract event sequence for frontend to visualize.
     
-    Returns list of: { type, value_contribution, y_position, funnel_required }
+    Events are OBLIGATIONS the frontend must fulfill visually.
+    Frontend decides HOW and WHERE to show them.
+    
+    Event types:
+    - collectible: Player must visually collect N items
+    - multiplier: Player must hit bonus object (black hole)
+    - end: Round must end (frontend spawns blocking geometry)
     """
     events = []
-    payout = outcome['payout']
-    terminal_depth = outcome['terminal_depth_y']
     
-    # Zero payout = no events, early termination
-    if outcome['is_loss'] or payout == 0:
-        return []
+    # Zero payout = immediate end, no events
+    if outcome['is_loss'] or outcome['payout'] == 0:
+        events.append({
+            'type': 'end',
+            'reason': 'loss'
+        })
+        return events
     
-    # Calculate how many events based on payout magnitude
-    # Small wins: 1-2 events, Big wins: 4-6 events
-    multiplier = outcome['multiplier']
-    
-    if multiplier < 1.0:
-        num_events = 1
-    elif multiplier < 3.0:
-        num_events = 2
-    elif multiplier < 10.0:
-        num_events = 3
-    elif multiplier < 50.0:
-        num_events = 4
-    else:
-        num_events = 5
-    
-    # Distribute payout across events (not equally - varied for natural feel)
-    base_portion = 0.3  # 30% is "base" just from falling
-    event_portion = 0.7  # 70% from collectibles
-    
-    remaining_value = int(payout * event_portion)
-    
-    # Space events evenly between start and terminal depth
-    fall_distance = terminal_depth - DEADZONE - 500
-    event_spacing = fall_distance / (num_events + 1)
-    
-    for i in range(num_events):
-        # Calculate Y position for this event
-        y_position = DEADZONE + int((i + 1) * event_spacing)
-        
-        # Calculate value contribution (varied using seeded random)
-        if i == num_events - 1:
-            # Last event gets remaining value
-            value = remaining_value
-        else:
-            # Random portion between 15-35% of remaining
-            portion = 0.15 + seeded_random(rng_value, 1000 + i) * 0.20
-            value = int(remaining_value * portion)
-            remaining_value -= value
-        
+    # Collectible event (abstract count, no positions)
+    if outcome['collectible_count'] > 0:
         events.append({
             'type': 'collectible',
-            'value_contribution': value,
-            'y_position': y_position,
-            'funnel_required': True,
-            'event_index': i
+            'count': outcome['collectible_count']
         })
     
-    # Add black hole event if triggered
+    # Multiplier event (black hole bonus)
     if outcome['black_hole_triggered']:
-        bh_y = DEADZONE + int(0.7 * fall_distance)  # 70% down the path
         events.append({
-            'type': 'black_hole',
-            'value_contribution': 0,  # Multiplier applied to total
-            'y_position': bh_y,
-            'funnel_required': True,
-            'multiplier': outcome['black_hole_multiplier'],
-            'event_index': len(events)
+            'type': 'multiplier',
+            'value': round(outcome['black_hole_multiplier'], 2)
         })
     
-    # Sort events by Y position (top to bottom)
-    events.sort(key=lambda e: e['y_position'])
+    # End event (always last)
+    events.append({
+        'type': 'end',
+        'reason': 'complete'
+    })
     
     return events
 
 # ═══════════════════════════════════════════════════════════════════════════
-# FUNNEL GEOMETRY GENERATION - FORCED PATH
+# WEB ROUTES
 # ═══════════════════════════════════════════════════════════════════════════
 
-def generate_event_funnel(event: dict, corridor: dict, rng_value: float) -> dict:
-    """
-    Generate V-shaped funnel formation that GUARANTEES player passes through event.
-    The event item is placed at the funnel throat.
-    
-    Funnel structure:
-        \\     /    <- Upper wings (angled inward)
-         \\   /
-          \\ /
-           *       <- Event item at throat
-          ===      <- Catch platform below
-    """
-    y = event['y_position']
-    event_idx = event['event_index']
-    
-    # Funnel dimensions
-    funnel_width = 600  # Width at top of funnel
-    throat_width = 150  # Width at throat (just wider than player)
-    funnel_height = 400  # Vertical height of funnel
-    
-    # Slight random offset to feel natural (but still centered in corridor)
-    offset = (seeded_random(rng_value, 2000 + event_idx) - 0.5) * 100
-    center_x = corridor['center_x'] + offset
-    
-    clouds = []
-    
-    # Upper left wing (angled cloud)
-    clouds.append({
-        'x': center_x - funnel_width / 2 - CLOUD1_W / 2,
-        'y': y - funnel_height,
-        'type': 'funnel_wing',
-        'cloud_type': 1,
-        'angle': 15  # Degrees, tilted inward
-    })
-    
-    # Upper right wing (angled cloud)
-    clouds.append({
-        'x': center_x + funnel_width / 2 - CLOUD1_W / 2,
-        'y': y - funnel_height,
-        'type': 'funnel_wing',
-        'cloud_type': 1,
-        'angle': -15  # Tilted inward
-    })
-    
-    # Middle guide clouds (narrowing the path)
-    clouds.append({
-        'x': center_x - throat_width - CLOUD1_W,
-        'y': y - funnel_height / 2,
-        'type': 'funnel_guide',
-        'cloud_type': 2
-    })
-    clouds.append({
-        'x': center_x + throat_width,
-        'y': y - funnel_height / 2,
-        'type': 'funnel_guide',
-        'cloud_type': 2
-    })
-    
-    # Catch platform below throat (prevents falling past without collection)
-    clouds.append({
-        'x': center_x - CLOUD1_W / 2,
-        'y': y + 100,
-        'type': 'funnel_catch',
-        'cloud_type': 1
-    })
-    
-    # Event item position (at throat)
-    item_position = {
-        'x': center_x - 50,  # Centered (100px item width assumed)
-        'y': y
-    }
-    
-    return {
-        'event': event,
-        'clouds': clouds,
-        'item_position': item_position,
-        'center_x': center_x,
-        'throat_y': y
-    }
+@app.route('/')
+def index():
+    """Serve the main game page"""
+    return app.send_static_file('index.html')
 
 # ═══════════════════════════════════════════════════════════════════════════
-# WORLD PLAN GENERATION - THE KEY FIX
-# ═══════════════════════════════════════════════════════════════════════════
-
-def generate_world_plan(rng_value: float, outcome: dict) -> dict:
-    """
-    Generate a complete world plan that GUARANTEES the outcome.
-    The frontend will build this world exactly - no randomness.
-    
-    NEW: Includes forced event funnels that guarantee player interactions.
-    """
-
-    terminal_depth = outcome['terminal_depth_y']
-    is_loss = outcome['is_loss']
-
-    # Corridor definition - constrains horizontal movement
-    corridor = {
-        'center_x': CORRIDOR_CENTER,
-        'width': CORRIDOR_WIDTH,
-        'left_bound': CORRIDOR_CENTER - CORRIDOR_WIDTH // 2,
-        'right_bound': CORRIDOR_CENTER + CORRIDOR_WIDTH // 2
-    }
-
-    # ══════════════════════════════════════════════════════════════════════
-    # NEW: Decompose payout into forced events and generate funnels
-    # ══════════════════════════════════════════════════════════════════════
-    forced_events = decompose_payout_to_events(outcome, rng_value)
-    
-    # Generate funnel geometry for each forced event
-    event_funnels = []
-    for event in forced_events:
-        funnel = generate_event_funnel(event, corridor, rng_value)
-        event_funnels.append(funnel)
-    
-    # For zero-payout, set fall=False to prevent any movement
-    if is_loss:
-        return {
-            'fall': False,
-            'corridor': corridor,
-            'terminal_closure': generate_terminal_closure(rng_value, DEADZONE + 500, corridor, True),
-            'forced_events': [],
-            'event_funnels': []
-        }
-
-    # Generate guide clouds - these create the path DOWN to terminal depth
-    guide_clouds = generate_guide_clouds(rng_value, terminal_depth, corridor)
-
-    # Generate terminal closure - blocks further descent
-    terminal_closure = generate_terminal_closure(rng_value, terminal_depth, corridor, is_loss)
-
-    # Generate wall clouds - block escape outside corridor
-    wall_clouds = generate_wall_clouds(rng_value, terminal_depth, corridor)
-
-    # Generate black hole position (if triggered) - now placed at funnel throat
-    black_hole = None
-    if outcome['black_hole_triggered']:
-        # Find black hole event from forced_events
-        bh_event = next((e for e in forced_events if e['type'] == 'black_hole'), None)
-        if bh_event:
-            bh_funnel = next((f for f in event_funnels if f['event']['type'] == 'black_hole'), None)
-            if bh_funnel:
-                black_hole = {
-                    'x': bh_funnel['item_position']['x'],
-                    'y': bh_funnel['item_position']['y'],
-                    'will_trigger': True
-                }
-        
-        # Fallback to old method if not found
-        if not black_hole:
-            black_hole = generate_black_hole_position(rng_value, terminal_depth, corridor)
-
-    # Place collectibles at funnel throat positions (forced interaction)
-    collectibles = []
-    for funnel in event_funnels:
-        if funnel['event']['type'] == 'collectible':
-            collectibles.append({
-                'x': funnel['item_position']['x'],
-                'y': funnel['item_position']['y'],
-                'type': 'chain' if seeded_random(rng_value, 3000 + funnel['event']['event_index']) < 0.5 else 'music',
-                'value': funnel['event']['value_contribution'],
-                'forced': True
-            })
-    
-    # Add some cosmetic collectibles (not at funnel throats)
-    cosmetic_collectibles = generate_collectibles(rng_value, terminal_depth, corridor)
-    # Mark as not forced (just for display)
-    for c in cosmetic_collectibles:
-        c['forced'] = False
-    collectibles.extend(cosmetic_collectibles[:20])  # Limit cosmetic count
-
-    # Generate pushables (cosmetic physics objects)
-    pushables = generate_pushables(rng_value, terminal_depth, corridor)
-
-    # Generate dark clouds (trap clouds)
-    dark_clouds = generate_dark_clouds(rng_value, terminal_depth, corridor)
-
-    return {
-        'fall': True,  # Player should fall
-        'corridor': corridor,
-        'guide_clouds': guide_clouds,
-        'wall_clouds': wall_clouds,
-        'terminal_closure': terminal_closure,
-        'black_hole': black_hole,
-        'collectibles': collectibles,
-        'pushables': pushables,
-        'dark_clouds': dark_clouds,
-        # NEW: Forced interaction data
-        'forced_events': forced_events,
-        'event_funnels': event_funnels
-    }
-
-def generate_guide_clouds(rng_value: float, terminal_depth: int, corridor: dict) -> list:
-    """
-    Generate clouds that GUIDE the player down to terminal depth.
-    These clouds have gaps that allow descent within the corridor.
-    """
-    clouds = []
-
-    # Calculate number of cloud rows based on distance
-    fall_distance = terminal_depth - DEADZONE
-    row_spacing = 400  # Vertical spacing between cloud rows
-    num_rows = max(5, int(fall_distance / row_spacing))
-
-    for i in range(num_rows):
-        y = DEADZONE + int((i / num_rows) * (fall_distance - 500))
-
-        # Use seeded random for deterministic placement
-        row_rng = seeded_random(rng_value, i * 10)
-
-        # Create clouds on left and right with a gap in the middle
-        gap_offset = (row_rng - 0.5) * (corridor['width'] * 0.4)
-        gap_center = corridor['center_x'] + gap_offset
-        gap_width = 200 + row_rng * 150  # 200-350px gap
-
-        # Left cloud (if room)
-        left_cloud_x = gap_center - gap_width / 2 - CLOUD1_W
-        if left_cloud_x > corridor['left_bound'] - CLOUD1_W:
-            clouds.append({
-                'x': left_cloud_x,
-                'y': y,
-                'type': 'guide',
-                'cloud_type': 1 if seeded_random(rng_value, i * 10 + 1) < 0.5 else 2
-            })
-
-        # Right cloud (if room)
-        right_cloud_x = gap_center + gap_width / 2
-        if right_cloud_x < corridor['right_bound']:
-            clouds.append({
-                'x': right_cloud_x,
-                'y': y,
-                'type': 'guide',
-                'cloud_type': 1 if seeded_random(rng_value, i * 10 + 2) < 0.5 else 2
-            })
-
-    return clouds
-
-def generate_wall_clouds(rng_value: float, terminal_depth: int, corridor: dict) -> list:
-    """
-    Generate clouds that form WALLS outside the corridor.
-    These prevent horizontal escape.
-    """
-    walls = []
-
-    wall_spacing = 300
-    num_walls = int((terminal_depth - DEADZONE) / wall_spacing)
-
-    for i in range(num_walls):
-        y = DEADZONE + i * wall_spacing
-
-        # Left wall
-        walls.append({
-            'x': corridor['left_bound'] - CLOUD1_W - 50,
-            'y': y,
-            'type': 'wall',
-            'cloud_type': 1
-        })
-
-        # Right wall
-        walls.append({
-            'x': corridor['right_bound'] + 50,
-            'y': y,
-            'type': 'wall',
-            'cloud_type': 1
-        })
-
-    return walls
-
-def generate_terminal_closure(rng_value: float, terminal_depth: int, corridor: dict, is_loss: bool) -> dict:
-    """
-    Generate the TERMINAL CLOSURE - a formation that blocks all further descent.
-    This is what enforces the outcome.
-    """
-
-    # Select template based on RNG (deterministic)
-    template_rng = seeded_random(rng_value, 500)
-
-    if template_rng < 0.33:
-        template_name = "FLAT_SEAL"
-        # Solid wall of clouds
-        offsets = [
-            {'x': -450, 'y': 0},
-            {'x': -150, 'y': 0},
-            {'x': 150, 'y': 0},
-            {'x': 450, 'y': 0}
-        ]
-    elif template_rng < 0.66:
-        template_name = "OFFSET_SEAL"
-        # Interlocking pattern
-        offsets = [
-            {'x': -300, 'y': 0},
-            {'x': 300, 'y': 0},
-            {'x': 0, 'y': -200},
-            {'x': -600, 'y': -200},
-            {'x': 600, 'y': -200}
-        ]
-    else:
-        template_name = "FUNNEL_COLLAPSE"
-        # V-shape funnel
-        offsets = [
-            {'x': 0, 'y': 0},
-            {'x': -350, 'y': -250},
-            {'x': 350, 'y': -250},
-            {'x': -700, 'y': -500},
-            {'x': 700, 'y': -500}
-        ]
-
-    # Generate cloud positions
-    clouds = []
-    for offset in offsets:
-        clouds.append({
-            'x': corridor['center_x'] + offset['x'] - CLOUD1_W / 2,
-            'y': terminal_depth + offset['y'],
-            'type': 'terminal',
-            'cloud_type': 1,
-            'scale': 1.6  # Larger clouds for terminal
-        })
-
-    return {
-        'template': template_name,
-        'depth': terminal_depth,
-        'clouds': clouds
-    }
-
-def generate_black_hole_position(rng_value: float, terminal_depth: int, corridor: dict) -> dict:
-    """
-    Generate black hole position - appears in the path before terminal depth.
-    """
-    # Place black hole at 60-80% of the way to terminal
-    progress = 0.6 + seeded_random(rng_value, 200) * 0.2
-    y = DEADZONE + int(progress * (terminal_depth - DEADZONE - 500))
-
-    # Center it in the corridor with slight offset
-    x_offset = (seeded_random(rng_value, 201) - 0.5) * corridor['width'] * 0.3
-    x = corridor['center_x'] + x_offset - 150  # 150 = half of BH_SIZE
-
-    return {
-        'x': x,
-        'y': y,
-        'will_trigger': True
-    }
-
-def generate_collectibles(rng_value: float, terminal_depth: int, corridor: dict) -> list:
-    """
-    Generate collectibles - purely cosmetic, values don't affect payout.
-    """
-    collectibles = []
-
-    num_collectibles = 50 + int(seeded_random(rng_value, 300) * 50)
-
-    for i in range(num_collectibles):
-        item_rng = seeded_random(rng_value, 300 + i)
-
-        # Place within corridor with some margin
-        x = corridor['left_bound'] + item_rng * corridor['width']
-
-        # Place above terminal depth
-        y_rng = seeded_random(rng_value, 400 + i)
-        y = DEADZONE + y_rng * (terminal_depth - DEADZONE - 500)
-
-        collectibles.append({
-            'x': x,
-            'y': y,
-            'type': 'chain' if seeded_random(rng_value, 500 + i) < 0.4 else 'music'
-        })
-
-    return collectibles
-
-def generate_pushables(rng_value: float, terminal_depth: int, corridor: dict) -> list:
-    """
-    Generate pushable objects - cosmetic physics objects.
-    """
-    pushables = []
-
-    num_pushables = 10 + int(seeded_random(rng_value, 600) * 10)
-
-    for i in range(num_pushables):
-        item_rng = seeded_random(rng_value, 600 + i)
-
-        x = corridor['left_bound'] + item_rng * corridor['width'] - 275
-        y_rng = seeded_random(rng_value, 700 + i)
-        y = DEADZONE + y_rng * (terminal_depth - DEADZONE - 600)
-
-        pushables.append({'x': x, 'y': y})
-
-    return pushables
-
-def generate_dark_clouds(rng_value: float, terminal_depth: int, corridor: dict) -> list:
-    """
-    Generate dark clouds (trap clouds) - within corridor.
-    """
-    dark_clouds = []
-
-    num_dark = 5 + int(seeded_random(rng_value, 800) * 5)
-
-    for i in range(num_dark):
-        item_rng = seeded_random(rng_value, 800 + i)
-
-        x = corridor['left_bound'] + item_rng * (corridor['width'] - 280)
-        y_rng = seeded_random(rng_value, 900 + i)
-        y = DEADZONE + 500 + y_rng * (terminal_depth - DEADZONE - 1000)
-
-        dark_clouds.append({'x': x, 'y': y})
-
-    return dark_clouds
-
-# ═══════════════════════════════════════════════════════════════════════════
-# API ENDPOINTS
+# API ENDPOINTS - STAKE COMPLIANT
 # ═══════════════════════════════════════════════════════════════════════════
 
 @app.route('/wallet/authenticate', methods=['POST'])
@@ -680,7 +235,23 @@ def authenticate():
 
 @app.route('/play', methods=['POST'])
 def play():
-    """Start a new round - returns complete world plan"""
+    """
+    Start a new round - STAKE COMPLIANT.
+    
+    Returns ONLY:
+    - round_id: Unique identifier
+    - bet: Locked bet amount
+    - payout: Final payout (authoritative)
+    - events: Abstract event obligations
+    - flags: Game state flags
+    - balance: Updated balance
+    
+    Does NOT return:
+    - X/Y positions
+    - Cloud layouts
+    - Funnel geometry
+    - Terminal depths
+    """
 
     data = request.json
     session_id = data.get('sessionID')
@@ -711,11 +282,11 @@ def play():
         session['nonce']
     )
 
-    # Calculate outcome
+    # Calculate outcome (math only, no geometry)
     outcome = calculate_outcome(rng_value, bet, mode)
 
-    # Generate world plan that guarantees this outcome
-    world_plan = generate_world_plan(rng_value, outcome)
+    # Generate abstract events (no positions)
+    events = generate_abstract_events(outcome)
 
     # Create round record
     round_id = secrets.token_hex(16)
@@ -727,70 +298,28 @@ def play():
         'mode': mode,
         'rng_value': rng_value,
         'outcome': outcome,
-        'world_plan': world_plan,
+        'events': events,
         'status': 'active',
         'created_at': time.time()
     }
 
-    # Build visual timeline
-    visual_timeline = build_visual_timeline(outcome, world_plan)
-
+    # ═══════════════════════════════════════════════════════════════════════
+    # STAKE COMPLIANT RESPONSE - NO GEOMETRY, NO TIMING
+    # ═══════════════════════════════════════════════════════════════════════
     return jsonify({
         'round_id': round_id,
         'simulation_id': simulation_id,
         'bet': bet,
-        'balance': session['balance'],
-
-        # World plan - frontend builds world from this
-        'world_plan': world_plan,
-
-        # Outcome data - frontend uses this to know the target
-        'terminal_depth_y': outcome['terminal_depth_y'],
-        'max_payout_at_ground': outcome['payout'],
-        'black_hole_triggered': outcome['black_hole_triggered'],
-        'black_hole_multiplier': outcome['black_hole_multiplier'],
-
-        # Visual timeline for events
-        'visual_timeline': visual_timeline
+        'payout': outcome['payout'],
+        'events': events,
+        'flags': {
+            'is_loss': outcome['is_loss']
+        },
+        'balance': session['balance']
     })
 
-def build_visual_timeline(outcome: dict, world_plan: dict) -> list:
-    """Build visual event timeline for frontend animation"""
-
-    timeline = []
-
-    # Round start with world plan
-    timeline.append({
-        'type': 'round_start',
-        'timestamp': 0,
-        'terminal_depth_y': outcome['terminal_depth_y'],
-        'max_payout_at_ground': outcome['payout'],
-        'black_hole_triggered': outcome['black_hole_triggered'],
-        'black_hole_multiplier': outcome['black_hole_multiplier'],
-        'world_plan': world_plan
-    })
-
-    # Black hole bonus if triggered
-    if outcome['black_hole_triggered']:
-        timeline.append({
-            'type': 'bonus_enter',
-            'timestamp': 5000,  # Approximate time
-            'multiplier': outcome['black_hole_multiplier']
-        })
-        timeline.append({
-            'type': 'bonus_exit',
-            'timestamp': 10000,
-            'value': outcome['payout']
-        })
-
-    # Round end - this is the ONLY way to end the round
-    timeline.append({
-        'type': 'round_end',
-        'timestamp': 15000,  # Will be triggered by frontend when physics stops
-        'value': outcome['payout']
-    })
-
-    return timeline
+# build_visual_timeline DELETED - Stake backend must be stateless and timeless
+# Frontend controls all animation timing based on events array
 
 @app.route('/endround', methods=['POST'])
 def end_round():
@@ -830,6 +359,41 @@ def end_round():
         'status': 'completed'
     })
 
+# ═══════════════════════════════════════════════════════════════════════════
+# SIMULATION ENDPOINT (for headless RTP testing)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route('/simulate', methods=['POST'])
+def simulate():
+    """
+    Run headless simulation for RTP verification.
+    This endpoint is for testing only - not exposed in production.
+    """
+    data = request.json
+    num_rounds = data.get('num_rounds', 10000)
+    bet = data.get('bet', MONETARY_PRECISION)
+    
+    total_wagered = 0
+    total_returned = 0
+    
+    for i in range(num_rounds):
+        rng_value = seeded_random(0.5, i)  # Deterministic for testing
+        outcome = calculate_outcome(rng_value, bet)
+        total_wagered += bet
+        total_returned += outcome['payout']
+    
+    actual_rtp = total_returned / total_wagered if total_wagered > 0 else 0
+    
+    return jsonify({
+        'num_rounds': num_rounds,
+        'bet_per_round': bet,
+        'total_wagered': total_wagered,
+        'total_returned': total_returned,
+        'actual_rtp': round(actual_rtp, 4),
+        'actual_rtp_percentage': f"{actual_rtp * 100:.2f}%",
+        'target_rtp': RTP,
+        'variance': round(actual_rtp - RTP, 4)
+    })
+
 if __name__ == '__main__':
     app.run(debug=True, port=3000)
-
