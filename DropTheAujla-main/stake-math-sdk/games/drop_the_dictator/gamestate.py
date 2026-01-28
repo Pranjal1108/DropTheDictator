@@ -27,9 +27,9 @@ class GameState(GeneralGameState):
 
         # Collectibles (simplified sim)
         collectibles_bonus = 0.0
-        # For simplicity in this SDK generation, we might neglect collectibles or simulate them simply
-        # The prompt asked for specific files. The logic in game_math.py has them. 
-        # Let's implement basics.
+        for _, data in self.config.COLLECTIBLES.items():
+            if random.random() < data['spawn_probability']:
+                collectibles_bonus += data['value_multiplier']
         
         # Calculate Payout
         bet_amount = 1.0 # Standard unit bet for SDK
@@ -37,6 +37,9 @@ class GameState(GeneralGameState):
         
         # Apply Black Hole
         final_payout = base_payout * black_hole_multiplier
+        
+        # Add Collectibles (independent of multiplier)
+        final_payout += (bet_amount * collectibles_bonus)
         
         # Apply Cap
         final_payout = min(final_payout, self.config.wincap)

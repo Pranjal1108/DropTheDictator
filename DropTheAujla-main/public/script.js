@@ -5,7 +5,7 @@
 // SECTION 1: COMPLIANCE CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════════════
 const COMPLIANCE_CONFIG = {
-    RTP: "96.50%",
+    RTP: "96.00%",
     MAX_WIN: "5000x",
     VERSION: "2.1.0"
 };
@@ -480,7 +480,8 @@ function initializeRoundFromEvents() {
     // DON'T spawn collectibles or black holes yet - they spawn based on progress
     // Spawn terminal blocking formation at 95% progress
     const terminalY = fallStartY + (targetDistance * 0.95);
-    spawnBlockingFormation(terminalY);
+    // Blocking formation will be spawned JIT in processEventTimeline
+    // spawnBlockingFormation(terminalY);
 
     console.log('[STAKE-COMPLIANT] Round initialized:',
         'Payout:', backendFinalPayoutDisplay,
@@ -592,6 +593,55 @@ function processEventTimeline() {
 
     // Safety nets
     checkEventSafetyNets();
+
+    // JIT Spawning of Blocking Formation
+    const fallDistance = Math.max(0, camY - fallStartY);
+    if (!blockingFormationSpawned && !isZeroPayoutRound && targetDistance - fallDistance < 2500) {
+        const terminalY = fallStartY + targetDistance;
+        spawnBlockingFormation(terminalY);
+    }
+
+    // JIT Spawning of PENDING COLLECTIBLES
+    processPendingCollectibles();
+}
+
+function processPendingCollectibles() {
+    // Look ahead 2000px
+    const spawnHorizon = camY + 2000;
+    const playerX = camX + PLAYER_X;
+
+    // Filter pending items that should spawn now
+    for (let i = pendingCollectibles.length - 1; i >= 0; i--) {
+        const item = pendingCollectibles[i];
+        if (item.y < spawnHorizon) {
+            // It is time! Spawn it directly in front of the player
+            // Force random X close to player ( +/- 200px )
+            const jitX = playerX + (Math.random() * 400 - 200);
+
+            spawnJITCollectible(item, jitX, item.y);
+
+            // Remove from queue
+            pendingCollectibles.splice(i, 1);
+        }
+    }
+}
+
+function spawnJITCollectible(data, x, y) {
+    const el = document.createElement("div");
+    let arr;
+    if (data.type === 'chain') {
+        el.className = "collectible chain";
+        arr = chains;
+    } else {
+        el.className = "collectible music";
+        arr = notes;
+    }
+    el.style.left = (x - 85) + "px";
+    el.style.top = (y - 85) + "px";
+    world.appendChild(el);
+    const obj = { x, y, el };
+    arr.push(obj);
+    collectibles.push(obj);
 }
 
 // Spawn collectibles when reaching their progress windows
@@ -731,6 +781,9 @@ function applyCloudZoneBehavior() {
 
 // Safety nets - ensure obligations are fulfilled
 function checkEventSafetyNets() {
+    // Safety nets - ensure obligations are fulfilled
+    // DISABLED: User wants natural visuals only. No ghost/remote collection.
+    /*
     // Safety: Auto-fulfill collectibles if progress passes their window
     for (const scheduled of eventSchedule.collectibles) {
         if (!scheduled.fulfilled && currentProgress > scheduled.progress + 0.15) {
@@ -752,6 +805,7 @@ function checkEventSafetyNets() {
             }
         }
     }
+    */
 }
 
 // ╔════════════════════════════════════════════════════════════════════════════╗
@@ -789,6 +843,19 @@ function checkBlackHoleCollision() {
                 hasTriggeredBlackHole = true;
                 triggerBonusEnter(backendBlackHoleMultiplier);
                 return true;
+            } else if (dist < BH_SIZE * 0.8) {
+                // DUMMY BLACK HOLE HIT
+                // Play sound or effect so it's not "inert"
+                // Maybe a small screen shake or "warp" sound?
+                // prevent spamming
+                if (!bh.hasTriggeredEffect) {
+                    bh.hasTriggeredEffect = true;
+                    // Play a "wobble" sound? Re-use blackhole sound at low volume?
+                    // Or just shake
+                    const camShake = 10;
+                    camX += (Math.random() - 0.5) * camShake;
+                    camY += (Math.random() - 0.5) * camShake;
+                }
             }
         }
     }
@@ -804,75 +871,69 @@ function checkBlackHoleCollision() {
 let terminalDepthY = 18000; // Default, will be updated from backend or GROUND_Y
 let maxDepthReached = 0;
 let maxPayoutAtGround = 0;
+let backendCollectedValue = 0; // Total value of collectibles in this round
+let currentCollectedValue = 0; // Value picked up so far
 let stuckFrameCount = 0;
 let lastY = 0;
 let stoppingClouds = []; // Reused for blocking clouds
 let roundEnded = false;
 let naturalEndTriggered = false; // Missing variable added
+// Flag for JIT spawning
+let blockingFormationSpawned = false;
+
 function spawnBlockingFormation(targetY) {
-    // Remove any existing blocking clouds
+    if (blockingFormationSpawned) return;
+
+    // Remove any existing blocking clouds (safety)
     stoppingClouds.forEach(c => { if (c.el) c.el.remove(); });
     stoppingClouds = [];
-    // For zero payout/early stop
+
+    // For zero payout/early stop, we rely on natural end, but we still spawn a "floor" just in case
     if (targetY < fallStartY + 2000) {
-        return; // Early stop handled by naturalEndTriggered
+        // Just spawn a simple floor if it's a very short fall
     }
-    console.log('[WORLD] Spawning blocking formation at Y:', targetY);
-    // Terminal Closure Templates
-    // Designed to guarantee 100% blockage of the corridor
-    const centerX = 8000;
-    // Deterministic selection based on targetY to appear inevitable
-    const templateIdx = Math.floor(targetY) % 3;
-    let offsets = [];
-    let templateName = "";
-    switch (templateIdx) {
-        case 0: // Template A: Flat Seal (Solid Wall)
-            templateName = "FLAT SEAL";
-            // 4 clouds tight overlapping
-            offsets = [
-                { x: -450, y: 0 }, { x: -150, y: 0 }, { x: 150, y: 0 }, { x: 450, y: 0 }
-            ];
-            break;
-        case 1: // Template B: Offset Seal (Staggered rows)
-            templateName = "OFFSET SEAL";
-            // Interlocking bricks
-            offsets = [
-                { x: -300, y: 0 }, { x: 300, y: 0 },
-                { x: 0, y: -200 }, // Plug the gap from above
-                { x: -600, y: -200 }, { x: 600, y: -200 } // Wings
-            ];
-            break;
-        case 2: // Template C: Funnel Collapse (V-shape)
-            templateName = "FUNNEL COLLAPSE";
-            offsets = [
-                { x: 0, y: 0 }, // Bottom plug
-                { x: -350, y: -250 }, { x: 350, y: -250 }, // Sides
-                { x: -700, y: -500 }, { x: 700, y: -500 }  // Upper funnel
-            ];
-            break;
-    }
-    console.log(`[WORLD] Using Template: ${templateName}`);
-    offsets.forEach(offset => {
-        const x = centerX + offset.x;
+
+    console.log('[WORLD] Spawning blocking formation JIT at Y:', targetY);
+    blockingFormationSpawned = true;
+
+    // Center the formation on the CHARACTER'S current X (tracking real-time)
+    // Clamp to world bounds
+    let spawnX = camX + PLAYER_X;
+    const SAFETY_MARGIN = 1000;
+    spawnX = Math.max(-SCREEN_W * 4, Math.min(SCREEN_W * 4, spawnX));
+
+    // Select one of 500 formation sets deterministically based on roundId or random
+    // We use a high-entropy seed from targetY + roundStartTime
+    const seed = Math.floor(targetY + roundStartTime) % 500;
+
+    console.log(`[WORLD] Generating Formation Set #${seed}`);
+
+    const baseOffsets = generateFormationOffsets(seed);
+
+    baseOffsets.forEach(offset => {
+        const x = spawnX + offset.x;
         const y = targetY + offset.y; // Relative to terminal depth
+
         const el = document.createElement("div");
         el.className = "blocking-cloud";
+        // Visuals: Darker, "heavy" look
         el.style.cssText = `
             position: absolute;
-            width: ${CLOUD1_W * 1.6}px;
-            height: ${CLOUD1_H * 1.6}px;
-            background: url('items/movcloud1.png') no-repeat center/contain;
+            width: ${CLOUD1_W}px;
+            height: ${CLOUD1_H}px;
+            background: url('clouds/cloud4.png') no-repeat center/contain;
             left: ${x}px;
             top: ${y}px;
             z-index: 5;
-            filter: brightness(0.85) sepia(0.2); // Visual distinction for terminal clouds
         `;
         world.appendChild(el);
+
         const cloudCircles = CLOUD1.map(p => ({
-            x: x + p.x * CLOUD1_W * 1.6,
-            y: y + p.y * CLOUD1_H * 1.6,
-            r: p.r * CLOUD1_W * 1.6
+            x: x + p.x * CLOUD1_W,
+            y: y + p.y * CLOUD1_H,
+            r: p.r * CLOUD1_W
         }));
+
         stoppingClouds.push({
             x, y,
             el,
@@ -880,6 +941,81 @@ function spawnBlockingFormation(targetY) {
             isBlockingCloud: true
         });
     });
+}
+
+function generateFormationOffsets(seed) {
+    // 500 sets of different formations
+    // Strategy: Procedurally generate based on bits of the seed
+    const offsets = [];
+    const numClouds = 2 + (seed % 5); // 2 to 6 clouds
+
+    // "Tight" gap constant - ensuring gaps are smaller than player (W=160, H=240)
+    const MAX_GAP_X = 140;
+    const MAX_GAP_Y = 200;
+
+    // Pattern types:
+    // 0: Horizontal Wall
+    // 1: V-Shape (Funnel)
+    // 2: Inverted V
+    // 3: Cluster/Grid
+    // 4: ZigZag
+    const patternType = Math.floor(seed / 100) % 5;
+
+    // Randomize spacing slightly based on seed
+    const spacingX = 300 + (seed % 50);
+    const spacingY = 150 + ((seed * 7) % 50);
+
+    // Always add a "Core" cloud to catch the center
+    offsets.push({ x: 0, y: 0 });
+
+    for (let i = 1; i < numClouds; i++) {
+        let dx = 0, dy = 0;
+
+        switch (patternType) {
+            case 0: // Horizontal Wall (staggered slightly)
+                dx = (i % 2 === 0 ? 1 : -1) * Math.ceil(i / 2) * (spacingX * 0.8);
+                dy = (i % 3) * 50;
+                break;
+            case 1: // V-Shape
+                dx = (i % 2 === 0 ? 1 : -1) * Math.ceil(i / 2) * spacingX;
+                dy = -Math.ceil(i / 2) * spacingY;
+                break;
+            case 2: // Inverted V
+                dx = (i % 2 === 0 ? 1 : -1) * Math.ceil(i / 2) * spacingX;
+                dy = Math.ceil(i / 2) * spacingY;
+                break;
+            case 3: // Cluster
+                dx = (Math.cos(i * 2) * spacingX);
+                dy = (Math.sin(i * 2) * spacingY);
+                break;
+            case 4: // ZigZag
+                dx = (i % 2 === 0 ? 1 : -1) * 200;
+                dy = i * 150;
+                break;
+        }
+
+        // Ensure tightness - check overlap?
+        // Actually, we just place them relative to center. 
+        // We add these offsets.
+        offsets.push({ x: dx, y: dy });
+    }
+
+    // Add a secondary layer for some high seeds to close gaps
+    if (seed % 3 === 0) {
+        offsets.push({ x: -100, y: 150 });
+        offsets.push({ x: 100, y: 150 });
+    }
+
+    // FIX: Normalize offsets so the HIGHEST cloud (minimum Y) is at 0 relative to targetY
+    // This ensures the player hits the first cloud exactly at targetY, not above it
+    // which caused the "payout mismatch" issue.
+    const minY = offsets.reduce((min, p) => Math.min(min, p.y), Infinity);
+
+    // Shift all Ys so min is 0
+    return offsets.map(p => ({
+        x: p.x,
+        y: p.y - minY
+    }));
 }
 
 // ╔════════════════════════════════════════════════════════════════════════════╗
@@ -900,14 +1036,36 @@ function checkBlockingFormationCollision() {
                 const dy = p.y - circle.y;
                 const dist = Math.sqrt(dx * dx + dy * dy);
                 if (dist < circle.r + p.r) {
+
                     // Collision with blocking cloud!
-                    // Collision with blocking cloud!
-                    // Stop movement IMMEDIATELY to freeze in spot
-                    velX = 0;
-                    velY = 0;
-                    // Do NOT push character out - we want them to stick specifically where they hit
-                    // This prevents the "float up" effect
+                    // Apply AGGRESSIVE stopping physics to prevent pass-through
+                    const nx = dx / dist;
+                    const ny = dy / dist;
+                    const penetration = (circle.r + p.r) - dist;
+
+                    // Push out HARD to resolve intersection immediately
+                    // Overshoot slightly to ensure separation
+                    const corr = penetration * 1.1;
+                    camX += nx * corr;
+                    camY += ny * corr;
+
+                    // Kill velocity "Dead"
+                    // Friction: Kill ALL lateral movement (Stickiness)
+                    velX *= 0.1;
+
+                    // Bounce: ABSOLUTELY ZERO RESTITUTION for stopping clouds
+                    // User said: "friction turned way up... catches and stops"
+                    // If moving down, zero out Y or give tiny upwards push to prevent sinking
+                    if (velY > 0) {
+                        velY = 0;
+                    }
+
+                    // Kill spin
+                    angVel *= 0.1;
+
                     collisionOccurred = true;
+                    // Trigger sound effect for "thud" catch?
+
                 }
             }
         }
@@ -928,7 +1086,16 @@ function updateInvertedScore() {
     // Smooth easing
     const eased = 1 - Math.pow(1 - progress, 2);
     // STAKE-COMPLIANT: Animate towards backend payout, NEVER exceed it
-    visualScore = Math.min(backendFinalPayoutDisplay * eased, backendFinalPayoutDisplay);
+    // SEPARATE FALL SCORE FROM COLLECTIBLES
+    const basePayoutTarget = Math.max(0, backendFinalPayoutDisplay - backendCollectedValue);
+    const currentFallScore = Math.min(basePayoutTarget * eased, basePayoutTarget);
+
+    // Total Visual Score = Fall Score + Collectibles Picked Up So Far
+    visualScore = currentFallScore + currentCollectedValue;
+
+    // Safety cap
+    visualScore = Math.min(visualScore, backendFinalPayoutDisplay);
+
     visualEarnings = visualScore;  // Keep legacy alias in sync
     updateScoreDisplay();
 }
@@ -1030,9 +1197,9 @@ function checkNaturalGameEnd() {
     lastY = camY;
 }
 function processRoundEnd() {
-    // Clean up blocking clouds
-    stoppingClouds.forEach(c => { if (c.el) c.el.remove(); });
-    stoppingClouds = [];
+    // Clean up blocking clouds - MOVED to clearWorld() so they persist
+    // stoppingClouds.forEach(c => { if (c.el) c.el.remove(); });
+    // stoppingClouds = [];
 
     // Use backend payout directly (obligation-based system)
     handleRoundEndEvent(backendFinalPayoutDisplay);
@@ -1092,6 +1259,11 @@ function showCollectibleAnimation(position, value) {
         animation: floatUp 1s ease-out forwards; pointer-events: none;`;
     world.appendChild(floater);
     setTimeout(() => floater.remove(), 1000);
+
+    // ADD VALUE TO VISUAL SCORE IMMEDIATELY
+    currentCollectedValue += value;
+    // ensure we don't exceed backend
+    currentCollectedValue = Math.min(currentCollectedValue, backendCollectedValue);
 }
 function triggerLanding() {
     forceLandingActive = true;
@@ -1397,8 +1569,11 @@ async function placeBet() {
         backendBlackHoleMultiplier = multiplierEvent ? multiplierEvent.value : 1;
 
         // Count collectibles from events
-        const collectibleEvent = abstractEvents.find(e => e.type === 'collectible');
-        backendCollectibleCount = collectibleEvent ? collectibleEvent.count : 0;
+        const collectibleEvents = abstractEvents.filter(e => e.type === 'collectible');
+        backendCollectibleCount = collectibleEvents.length;
+        // Calculate total value of collectibles to separate form falling score
+        backendCollectedValue = collectibleEvents.reduce((sum, e) => sum + (e.value || 0), 0);
+        currentCollectedValue = 0; // Reset visual tracker
 
         currentEventIndex = 0;
         roundStartTime = performance.now();
@@ -1996,6 +2171,7 @@ function resetGameWorld() {
     explosionTriggered = false;  // Reset explosion flag
 
     hideWaitingIndicator();
+    blockingFormationSpawned = false; // Reset JIT flag
     spawnWorld();
     spawnCollectibles(PRESET_SPAWN_COUNT);
     silverjetWrap.style.display = "block";
@@ -2015,8 +2191,17 @@ function clearWorld() {
     pushables.length = 0;
 
     // FIX: Clear clouds and other entities to prevent accumulation
-    clouds.forEach(c => c.el.remove());
+    clouds.forEach(c => c.el.remove()); // Only for legacy
+    activeClouds.forEach(c => c.el.remove());
+    cosmeticClouds.forEach(c => c.el.remove());
+    activeClouds.length = 0;
+    cosmeticClouds.length = 0;
     clouds.length = 0;
+
+    // Clear blocking/stopping clouds
+    stoppingClouds.forEach(c => c.el.remove());
+    stoppingClouds.length = 0;
+    stoppingClouds = [];
 
     darkClouds.forEach(c => c.el.remove());
     darkClouds.length = 0;
@@ -2030,57 +2215,53 @@ function clearWorld() {
 // ═══════════════════════════════════════════════════════════════════════════
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║ BACKEND-CONTROLLED SPAWN: Collectibles                                      ║
-// ║ Uses backend spawn_data instead of Math.random() for Stake compliance       ║
+// ║ JIT IMPLEMENTATION: Queue items to spawn exactly when player arrives        ║
 // ╚════════════════════════════════════════════════════════════════════════════╝
+let pendingCollectibles = [];
+
 function spawnCollectibles(count = PRESET_SPAWN_COUNT) {
     [...collectibles, ...chains, ...notes].forEach(c => c.el.remove());
     collectibles.length = chains.length = notes.length = 0;
+    pendingCollectibles = []; // Clear queue
+
     // Use backend spawn data if available
     if (spawnData && spawnData.collectibles && spawnData.collectibles.length > 0) {
-        for (const item of spawnData.collectibles) {
-            const el = document.createElement("div");
-            let arr;
-            if (item.type === 'chain') {
-                el.className = "collectible chain";
-                arr = chains;
-            } else {
-                el.className = "collectible music";
-                arr = notes;
-            }
-            el.style.left = (item.x - 85) + "px";
-            el.style.top = (item.y - 85) + "px";
-            world.appendChild(el);
-            const obj = { x: item.x, y: item.y, el };
-            arr.push(obj);
-            collectibles.push(obj);
-        }
+        // QUEUE THEM for JIT spawning instead of placing immediately
+        // Sort by Y position (depth) to process in order
+        pendingCollectibles = [...spawnData.collectibles].sort((a, b) => a.y - b.y);
+        console.log(`[JIT] Queued ${pendingCollectibles.length} collectibles for spawning.`);
         return;
     }
-    // Fallback for initial page load (before first round)
+
+    // Fallback for initial page load (Random cosmetic only)
     const TOP_SAFE = DEADZONE;
     const BOTTOM_SAFE = GROUND_Y - DEADZONE;
     const actualCount = bonusMode ? count * 2 : count;
     for (let i = 0; i < actualCount; i++) {
-        const type = Math.random();
-        const el = document.createElement("div");
-        let arr;
-        if (type < 0.4) {
-            el.className = "collectible chain";
-            arr = chains;
-        } else {
-            el.className = "collectible music";
-            arr = notes;
-        }
-        const x = (Math.random() * SCREEN_W * 10) - (SCREEN_W * 5);
-        let y;
-        do { y = Math.random() * WORLDH; } while (y < TOP_SAFE || y > BOTTOM_SAFE);
-        el.style.left = (x - 85) + "px";
-        el.style.top = (y - 85) + "px";
-        world.appendChild(el);
-        const obj = { x, y, el };
-        arr.push(obj);
-        collectibles.push(obj);
+        // Random placement for cosmetic mode
+        spawnCosmeticCollectible(TOP_SAFE, BOTTOM_SAFE);
     }
+}
+
+function spawnCosmeticCollectible(minY, maxY) {
+    const type = Math.random();
+    const el = document.createElement("div");
+    let arr;
+    if (type < 0.4) {
+        el.className = "collectible chain";
+        arr = chains;
+    } else {
+        el.className = "collectible music";
+        arr = notes;
+    }
+    const x = (Math.random() * SCREEN_W * 10) - (SCREEN_W * 5);
+    const y = minY + Math.random() * (maxY - minY);
+    el.style.left = (x - 85) + "px";
+    el.style.top = (y - 85) + "px";
+    world.appendChild(el);
+    const obj = { x, y, el };
+    arr.push(obj);
+    collectibles.push(obj);
 }
 // ╔════════════════════════════════════════════════════════════════════════════╗
 // ║ BACKEND-CONTROLLED SPAWN: Black Holes                                       ║
@@ -2223,7 +2404,12 @@ function updateGroundEntitiesVisibility() {
     }
 }
 // Cloud management
-const clouds = [];
+let flightPath = []; // The scripted path the character follows blindly
+let flightPathIndex = 0;
+// Arrays for the two types of clouds requested
+const activeClouds = [];   // The ones we HIT (Scripted)
+const cosmeticClouds = []; // The ones purely for show (Background)
+const clouds = []; // Legacy array (kept empty to prevent ReferenceErrors in physics loop)
 const CLOUD1_W = 320 * 1.7, CLOUD1_H = 160 * 1.7;
 const CLOUD2_W = 325 * 1.5, CLOUD2_H = 217 * 1.5;
 const CLOUD1 = [
@@ -2253,34 +2439,114 @@ const CLOUD2 = [
 function randX() {
     return (Math.random() * SCREEN_W * 10) - (SCREEN_W * 5);
 }
+// New helper for safe spawns
+function safeRandX(avoidX, radius) {
+    let x;
+    let attempts = 0;
+    do {
+        x = randX();
+        attempts++;
+    } while (Math.abs(x - avoidX) < radius && attempts < 10);
+    return x;
+}
+
+// NATURAL PROXIMITY HELPER
+// Spawns clouds naturally around the target (player) but with enough randomness
+// to look organic. Avoids "lanes" or "obvious" placement.
+function naturalProximityRandX(targetX) {
+    // Spawn within a generous window around the player (e.g., +/- 900px)
+    // Screen width is typically 400-500px on mobile, so this covers ~2 screens width
+    const range = 900;
+
+    // Pure random offset within the range
+    const offset = (Math.random() * range * 2) - range;
+
+    // Add a small chance (20%) to spawn completely randomly in the wider world
+    // to separate the world from just "following" the player
+    if (Math.random() < 0.2) {
+        return randX();
+    }
+
+    return targetX + offset;
+}
+
 function spawnY() {
     const MAX_CLOUD_H = Math.max(CLOUD1_H, CLOUD2_H);
     const TOP_SAFE = DEADZONE;
     const BOTTOM_SAFE = GROUND_Y - DEADZONE - MAX_CLOUD_H;
     return TOP_SAFE + Math.random() * (BOTTOM_SAFE - TOP_SAFE);
 }
-function spawnCloud(x, y) {
+
+// Check if a position is safe from the Flight Path
+// Ensures cosmetic clouds are never in the way
+function isSafeFromPath(x, y, buffer = 400) {
+    if (flightPath.length === 0) return true;
+
+    // Check every 10th point for performance (approximation is fine)
+    for (let i = 0; i < flightPath.length; i += 10) {
+        const point = flightPath[i];
+        if (Math.abs(point.y - y) < 300) { // Vertical proximity
+            // FIX: Point.x is CameraX, we need WorldX (simX + PLAYER_X)
+            const playerWorldX = point.x + PLAYER_X;
+            if (Math.abs(playerWorldX - x) < buffer) { // Horizontal collision
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// 1. COSMETIC CLOUDS (Background/Show only)
+function spawnCosmeticCloud(x, y) {
+    // CRITICAL: Don't spawn if it interferes with the scripted path
+    if (!isSafeFromPath(x, y)) {
+        // Try to move it further out
+        x += (x > 0 ? 500 : -500);
+    }
+
     const pick = Math.random() < 0.5 ? 1 : 2;
     const el = document.createElement("div");
-    el.className = "cloud";
+    el.className = "cloud cosmetic"; // Mark as cosmetic for CSS/Debugging
+    el.style.opacity = "0.7"; // Slightly faded to indicate background
     let circles, W, H, base;
     if (pick === 1) {
         W = CLOUD1_W; H = CLOUD1_H; base = CLOUD1;
         el.style.width = W + "px";
         el.style.height = H + "px";
         el.style.background = `url('clouds/cloud4.png') no-repeat center/contain`;
-        circles = base.map(c => ({ x: x + c.x * W, y: y + c.y * H, r: c.r * W }));
+        circles = []; // Cosmetic clouds don't need physics circles
     } else {
         W = CLOUD2_W; H = CLOUD2_H; base = CLOUD2;
         el.style.width = W + "px";
         el.style.height = H + "px";
         el.style.background = `url('clouds/cloud2.png') no-repeat center/contain`;
-        circles = base.map(c => ({ x: x + c.x * W, y: y + c.y * H, r: c.r * W }));
+        circles = [];
     }
     el.style.left = x + "px";
     el.style.top = y + "px";
     world.appendChild(el);
-    clouds.push({ x, y, el, circles });
+    cosmeticClouds.push({ x, y, el });
+}
+
+// 2. ACTIVE CLOUDS (Scripted Targets)
+function spawnActiveCloud(x, y) {
+    const el = document.createElement("div");
+    el.className = "cloud active";
+    // Use the "Hard" cloud look
+    const W = CLOUD1_W, H = CLOUD1_H;
+    el.style.width = W + "px";
+    el.style.height = H + "px";
+    el.style.background = `url('clouds/cloud4.png') no-repeat center/contain`;
+    el.style.left = x + "px";
+    el.style.top = y + "px";
+    // Highlight slightly so player knows it's "Solid"
+    // el.style.filter = "brightness(1.2)"; 
+    world.appendChild(el);
+
+    // Store with physics boundaries for the "Look" of collision
+    // (Actual physics is pre-calculated, but visual sync needs this)
+    const circles = CLOUD1.map(c => ({ x: x + c.x * W, y: y + c.y * H, r: c.r * W }));
+    activeClouds.push({ x, y, el, circles });
 }
 // Dark cloud management
 const darkClouds = [];
@@ -2321,18 +2587,105 @@ function spawnDarkCloud(x, y) {
 // ║ BACKEND-CONTROLLED SPAWN: World spawning                                    ║
 // ║ Uses backend spawn_data for clouds and dark clouds when available           ║
 // ╚════════════════════════════════════════════════════════════════════════════╝
+// ╔════════════════════════════════════════════════════════════════════════════╗
+// ║ SCRIPTED PATH GENERATOR                                                    ║
+// ║ Simulates physics instantly to create a "Movie Script" for the character   ║
+// ╚════════════════════════════════════════════════════════════════════════════╝
+function generateScriptedTrajectory(seed) {
+    flightPath = [];
+    flightPathIndex = 0;
+
+    // Simulation State
+    let simX = 0;
+    let simY = 0;
+    let simVelX = 0;
+    let simVelY = 0;
+    let simAngle = 0;
+    let simAngVel = 0;
+
+    // Clear existing Active Clouds
+    activeClouds.forEach(c => c.el.remove());
+    activeClouds.length = 0;
+
+    const TARGET_DEPTH = GROUND_Y;
+    const DT = 1; // 1 frame per step
+
+    // Simulate until ground
+    while (simY < TARGET_DEPTH) {
+        // 1. Gravity
+        simVelY += GRAVITY;
+        simVelY = Math.min(simVelY, MAX_FALL);
+
+        // 2. Decide to "Hit a Cloud"?
+        // Random chance, but spaced out (check last hit Y) check not needed if probability is low
+        // We want maybe 3-4 hits total in a fall
+        if (simY > 1000 && simY < TARGET_DEPTH - 2000 && Math.random() < 0.015) {
+            // Create an ACTIVE cloud at the impact point
+            // Offset it slightly so we hit the 'edge' and bounce
+            const bounceDir = Math.random() < 0.5 ? -1 : 1;
+
+            // Place cloud so its edge hits player
+            // Place cloud so its edge hits player
+            // Player is FIXED at PLAYER_X relative to Camera (simX)
+            // World X = simX (Camera) + PLAYER_X
+            // World Y = simY (Camera) + PLAYER_Y
+
+            // Offset logic:
+            // If Bounce RIGHT (1), Obstacle must be on LEFT (-).
+            // Distance 300px roughly touches edge of player (CloudW/2 + PlayerW/2 ~ 160+80=240)
+            const offsetX = bounceDir === 1 ? -300 : 300;
+
+            // KEY FIX: Add PLAYER_X and PLAYER_Y to align visual with camera
+            const cloudX = simX + PLAYER_X + offsetX;
+            const cloudY = simY + PLAYER_Y;
+
+            spawnActiveCloud(cloudX, cloudY);
+
+            // Apply Physics Response (Scripted Bounce)
+            // "Pushed away in X axis"
+            simVelX = bounceDir * (15 + Math.random() * 10); // Strong push
+            simVelY = 0; // Stop fall momentarily
+            simAngVel = bounceDir * 0.1; // Spin
+        }
+
+        // 3. Move
+        simX += simVelX;
+        simY += simVelY;
+
+        // 4. Drag
+        simVelX *= AIR_FRICTION;
+
+        // 5. Record
+        flightPath.push({
+            x: simX,
+            y: simY,
+            angle: simAngle,
+            vx: simVelX,
+            vy: simVelY
+        });
+
+        simAngle += simAngVel;
+    }
+    console.log(`[SCRIPT] Generated flight path with ${flightPath.length} frames.`);
+}
+
 function spawnWorld() {
-    // Spawn clouds using backend data if available
+    // 1. GENERATE THE SCRIPT FIRST
+    // This defines where the character goes and where Active Clouds are
+    generateScriptedTrajectory(Date.now());
+
+    // 2. SPAWN COSMETIC CLOUDS (Background)
+    // "Scattered and much random... never in character's way"
+    // Use isSafeFromPath inside spawnCosmeticCloud
     if (!bonusMode) {
-        if (spawnData && spawnData.clouds && spawnData.clouds.length > 0) {
-            for (const item of spawnData.clouds) {
-                spawnCloud(item.x, item.y);
-            }
-        } else {
-            // Fallback for initial page load
-            for (let i = 0; i < cloudquantity; i++) spawnCloud(randX(), spawnY());
+        // Use backend seeds if available, or just random
+        // For cosmetic, random is fine as long as safe
+        for (let i = 0; i < 200; i++) {
+            // FIX: Spawn around PLAYER_X (960), not 0, so they cover the screen
+            spawnCosmeticCloud(naturalProximityRandX(PLAYER_X), spawnY());
         }
     }
+
     // Spawn dark clouds using backend data if available
     if (spawnData && spawnData.dark_clouds && spawnData.dark_clouds.length > 0) {
         for (const item of spawnData.dark_clouds) {
@@ -2408,7 +2761,9 @@ function recycleClouds() {
     for (let c of clouds) {
         if (c.y < TOP - REUSE_DISTANCE || c.y > BOTTOM + REUSE_DISTANCE) {
             c.y = c.y < TOP ? BOTTOM - Math.random() * 1200 : TOP + Math.random() * 1200;
-            c.x = randX();
+            const playerWorldX = camX + PLAYER_X;
+            // NATURAL RECYCLING
+            c.x = naturalProximityRandX(playerWorldX);
         }
         c.el.style.left = c.x + "px";
         c.el.style.top = c.y + "px";
@@ -2495,11 +2850,48 @@ function resolveCollisions() {
         nx /= contacts.length; ny /= contacts.length; depth /= contacts.length;
         const len = Math.hypot(nx, ny) || 0.00001;
         nx /= len; ny /= len;
+
+        // --- PHYSICS MODIFICATION ---
+        // Check if we are hitting a blocking cloud or a normal cloud
+        // We can infer this by checking if any contact matches a blocking cloud circle
+        // But simpler: we know what we collided with if we tracked it in the loop above.
+        // Re-looping slightly inefficient but safe:
+        let isBlocking = false;
+
+        // Helper to check if a circle belongs to blocking clouds
+        // (Optimization: we could attach this data to the contact object)
+
+        // For now, let's assume if it's very deep (terminal behavior) it's blocking
+        // OR better: Assume contacts came from the combined loop. 
+        // Let's modify the loop above to tag contacts.
+
+        // Since I can't easily modify the loop structure without a huge replace, 
+        // I will use `stoppingClouds` check.
+        // Actually, let's just apply the logic based on Y depth or flag.
+
+        // Assuming `clouds` contains both? No, `stoppingClouds` is separate.
+        // Wait, the collision loop only iterates `clouds`. `stoppingClouds` are separate in `checkBlockingFormationCollision`?
+        // Ah, `checkBlockingFormationCollision` (Line 892) sets vel=0 directly! 
+        // AND `resolveCollisions` iterates `clouds` (Line 2475).
+
+        // IMPLICIT ISSUE: `checkBlockingFormationCollision` handles blocking clouds separately and BRUTALLY (vel=0).
+        // `resolveCollisions` handles normal clouds.
+
+        // REFACTOR PLAN:
+        // 1. Disable the brutal stop in `checkBlockingFormationCollision`. Make it do nothing or return 'true' to indicate hit.
+        // 2. Add `stoppingClouds` to the `resolveCollisions` loop OR handle them there.
+        // 3. User wants "Natural" stop. 
+
+        // Let's modify `resolveCollisions` to iterate ONLY `clouds` (normal).
+        // We will Apply the "Push Away" logic here for NORMAL clouds.
+
+        // Start standard physics response...
         const ref = contacts[0];
         const rx = ref.px - bodyCX, ry = ref.py - bodyCY;
         const relVX = velX - (-angVel * ry);
         const relVY = velY + (angVel * rx);
         const relNormal = relVX * nx + relVY * ny;
+
         if (relNormal < 0) {
             const speed = Math.hypot(relVX, relVY);
             const e = restitutionFromSpeed(speed);
@@ -2515,6 +2907,7 @@ function resolveCollisions() {
             if (vt > 0.0001) {
                 const tx = vtX / vt, ty = vtY / vt;
                 let jt = -vt / denom;
+                const muKinetic = 0.08;
                 const maxFriction = muKinetic * Math.abs(j);
                 jt = Math.max(-maxFriction, Math.min(maxFriction, jt));
                 velX += (jt * tx) / MASS;
@@ -2522,6 +2915,7 @@ function resolveCollisions() {
                 angVel += (rCrossN * jt) / I;
             }
         }
+
         angVel = Math.max(-0.05, Math.min(0.05, angVel));
         const corr = Math.min(Math.max(depth - 1.5, 0) * 0.45, 8);
         camX += nx * corr;
@@ -2812,8 +3206,35 @@ function update() {
         velX *= 0.9;
     }
     velY = Math.min(velY, MAX_FALL);
-    camX += velX;
-    camY += velY;
+
+    // ╔════════════════════════════════════════════════════════════════════════╗
+    // ║ OVERRIDE: SCRIPTED MOVEMENT                                            ║
+    // ║ "Character just follows it blindly"                                    ║
+    // ╚════════════════════════════════════════════════════════════════════════╝
+    if (fallStarted && flightPath.length > 0 && flightPathIndex < flightPath.length) {
+        // Follow the script
+        const frame = flightPath[flightPathIndex];
+
+        // Smoothly interpolate if needed, but per-frame sync is best for "blind" following
+        camX = frame.x;
+        camY = frame.y;
+
+        // We can still use velocity for visual effects (like particles)
+        velX = frame.vx;
+        velY = frame.vy;
+
+        flightPathIndex++;
+
+        // Manual "Stop" check if script ends
+        if (flightPathIndex >= flightPath.length - 1) {
+            // Script ended (reached ground or target)
+            // Handled by checkNaturalGameEnd via progress
+        }
+    } else {
+        // Legacy Physics Fallback (shouldn't happen if initialized correctly)
+        camX += velX;
+        camY += velY;
+    }
     for (const p of pushables) {
         p.x += p.velX;
         p.y += p.velY;
