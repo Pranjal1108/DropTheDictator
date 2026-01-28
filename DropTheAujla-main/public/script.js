@@ -1064,13 +1064,18 @@ function triggerBonusEnter(multiplier) {
     camY = VOID_START_Y;
     velX = velY = angVel = 0;
     bhMovingBgEl = document.createElement("div");
-    bhMovingBgEl.style.cssText = `position: absolute; width: ${VOID_BG_WIDTH}px; 
-        height: ${VOID_BG_HEIGHT}px; left: ${(SCREEN_W - VOID_BG_WIDTH) / 2}px; 
-        top: ${VOID_ZONE_Y}px; background: url('items/Bonus_bg.png') no-repeat; 
+    bhMovingBgEl.style.cssText = `position: absolute; width: ${VOID_BG_WIDTH}px;
+        height: ${VOID_BG_HEIGHT}px; left: ${(SCREEN_W - VOID_BG_WIDTH) / 2}px;
+        top: ${VOID_ZONE_Y}px; background: url('items/Bonus_bg.png') no-repeat;
         background-size: ${VOID_BG_WIDTH}px ${VOID_BG_HEIGHT}px; z-index: 11;`;
     world.appendChild(bhMovingBgEl);
     originalSpriteBg = sprite.style.backgroundImage;
     sprite.style.backgroundImage = "url('items/jetpack.png')";
+
+    // Play black hole sound
+    blackHoleSound.currentTime = 0;
+    blackHoleSound.play().catch(e => console.log('Black hole sound failed to play:', e));
+
     showMultiplier(bhCurrentMultiplier);
 }
 function triggerBonusExit(finalValue) {
@@ -1765,7 +1770,62 @@ function initBetControls() {
 // Will be called after DOM is ready
 document.addEventListener('DOMContentLoaded', initBetControls);
 // ═══════════════════════════════════════════════════════════════════════════
-// SECTION 15: GAME CONSTANTS
+// SECTION 15: AUDIO SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════
+const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+const backgroundMusic = new Audio('items/background_music.mp3');
+backgroundMusic.loop = true;
+backgroundMusic.volume = 0.3; // Start at 30% volume (minimum)
+
+// Background music fade functions
+let fadeInterval = null;
+
+function fadeVolume(audio, targetVolume, duration = 2000) {
+    if (fadeInterval) clearInterval(fadeInterval);
+
+    const startVolume = audio.volume;
+    const volumeDifference = targetVolume - startVolume;
+    const steps = 50; // Number of steps for smooth fade
+    const stepDuration = duration / steps;
+    let currentStep = 0;
+
+    fadeInterval = setInterval(() => {
+        currentStep++;
+        const progress = currentStep / steps;
+        // Smooth easing
+        const easedProgress = 1 - Math.pow(1 - progress, 2);
+        audio.volume = startVolume + (volumeDifference * easedProgress);
+
+        if (currentStep >= steps) {
+            clearInterval(fadeInterval);
+            fadeInterval = null;
+            audio.volume = targetVolume; // Ensure exact target volume
+        }
+    }, stepDuration);
+}
+
+function fadeInBackgroundMusic() {
+    fadeVolume(backgroundMusic, 1.0, 3000); // Fade to 100% over 3 seconds
+}
+
+function fadeOutBackgroundMusic() {
+    fadeVolume(backgroundMusic, 0.3, 2000); // Fade to 30% over 2 seconds
+}
+
+const notesSound = new Audio('items/notes_sound.mp3');
+notesSound.volume = 0.5;
+
+const nukeSound = new Audio('items/nuke_sound.mp3');
+nukeSound.volume = 0.5;
+
+const blackHoleSound = new Audio('items/Black_hole_sound.mp3');
+blackHoleSound.volume = 0.6;
+
+const lightningSound = new Audio('items/lightning_sound.mp3');
+lightningSound.volume = 0.7;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 16: GAME CONSTANTS
 // ═══════════════════════════════════════════════════════════════════════════
 const REUSE_DISTANCE = 1500;
 const gameScale = document.getElementById("game-scale");
@@ -1943,6 +2003,9 @@ function resetGameWorld() {
     // Restore sprite visibility after explosion/kill
     const sprite = document.getElementById("sprite");
     if (sprite) sprite.style.display = "block";
+
+    // Fade out background music when resetting game world
+    fadeOutBackgroundMusic();
 }
 function clearWorld() {
     [...collectibles, ...chains, ...notes].forEach(c => c.el.remove());
@@ -2480,6 +2543,11 @@ function resolveCollisions() {
                     velX = velY = angVel = 0;
                     skeleton.style.display = "block";
                     sprite.style.display = "block";
+
+                    // Play lightning sound when touching dark cloud
+                    lightningSound.currentTime = 0;
+                    lightningSound.play().catch(e => console.log('Lightning sound failed to play:', e));
+
                     let show = false;
                     skeletonFlashInterval = setInterval(() => {
                         show = !show;
@@ -2776,6 +2844,15 @@ function update() {
                     // Show pickup animation with proportional value
                     showCollectibleAnimation({ x: c.x, y: c.y }, collectibleValue);
 
+                    // Play collectible sound
+                    if (collectibleType === 'nuke') {
+                        nukeSound.currentTime = 0;
+                        nukeSound.play().catch(e => console.log('Nuke sound failed to play:', e));
+                    } else if (collectibleType === 'notes') {
+                        notesSound.currentTime = 0;
+                        notesSound.play().catch(e => console.log('Notes sound failed to play:', e));
+                    }
+
                     c.el.remove();
                     arr.splice(i, 1);
                     break;
@@ -2948,6 +3025,11 @@ async function onStartPress() {
 
     createRulesButton();
     createDisclaimer();
+
+    // Start background music with fade in
+    backgroundMusic.play().then(() => {
+        fadeInBackgroundMusic();
+    }).catch(e => console.log('Background music failed to play:', e));
 
     await initializeGame();
     update();
