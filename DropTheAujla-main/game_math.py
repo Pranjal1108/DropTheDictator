@@ -433,21 +433,119 @@ class GameMath:
         # Helper for random X within corridor
         def get_corridor_x():
             return CORRIDOR_MIN_X + self.rng.generate_random() * CORRIDOR_WIDTH
+
+        # ---------------------------------------------------------
+        # FLIGHT PATH GENERATION
+        # ---------------------------------------------------------
+        # Generate a zig-zag path to ensure character hits obstacles/clouds
+        path_points = []
+        current_y = TOP_SAFE
+        current_x = WORLD_CENTER_X  # Start center
         
-        # Generate collectible positions
+        # Zig-zag parameters - adjusted for ~100 corners
+        SEGMENT_HEIGHT_MIN = 150
+        SEGMENT_HEIGHT_MAX = 250
+        X_VARIANCE = 500  # How far to sway left/right
+        
+        path_points.append((current_x, current_y)) # Start point
+        
+        direction = 1 if self.rng.generate_random() < 0.5 else -1 # 1 = Right, -1 = Left
+        
+        while current_y < BOTTOM_SAFE:
+            # Calculate next point
+            step_y = SEGMENT_HEIGHT_MIN + self.rng.generate_random() * (SEGMENT_HEIGHT_MAX - SEGMENT_HEIGHT_MIN)
+            next_y = current_y + step_y
+            
+            if next_y > BOTTOM_SAFE:
+                next_y = BOTTOM_SAFE
+                
+            # Calculate next X (sway)
+            # If direction is 1 (Right), target should be Center + Variance
+            # If direction is -1 (Left), target should be Center - Variance
+            # But we can also just move relative to current_x
+            
+            # Simple approach: target random X in the direction
+            if direction == 1:
+                target_x = WORLD_CENTER_X + (100 + self.rng.generate_random() * (X_VARIANCE - 100))
+            else:
+                target_x = WORLD_CENTER_X - (100 + self.rng.generate_random() * (X_VARIANCE - 100))
+            
+            # Clamp to designated corridor
+            target_x = max(CORRIDOR_MIN_X + 100, min(CORRIDOR_MAX_X - 100, target_x))
+            
+            # Add point
+            path_points.append((target_x, next_y))
+            
+            # -----------------------------------------------------
+            # CLOUD PLACEMENT AT TURN (The "Push")
+            # -----------------------------------------------------
+            # If we are moving LOW->HIGH Y (down), and need to move X to target_x
+            # We need a cloud at the start of the turn to "push" us
+            
+            # If pushing RIGHT (dx > 0): Cloud should be on LEFT of character
+            # If pushing LEFT (dx < 0): Cloud should be on RIGHT of character
+            
+            dx = target_x - current_x
+            
+            # Cloud Offset
+            CLOUD_OFFSET_X = 150 # Distance from path center to cloud center
+            
+            cloud_x = 0
+            # Logic: 
+            # If moving Right (dx > 0), we want a cloud on the left side of the path point
+            # so the character "bounces" off it to the right.
+            if dx > 0:
+                # Moving Right -> Cloud on Left
+                # "make the clouds offset a bit left from the center"
+                # Center here refers to the path vertex (current_x)
+                cloud_x = current_x - CLOUD_OFFSET_X 
+            else:
+                # Moving Left -> Cloud on Right
+                cloud_x = current_x + CLOUD_OFFSET_X
+            
+            spawn_data['clouds'].append({
+                'type': 1 if self.rng.generate_random() < 0.5 else 2,
+                'x': round(cloud_x, 2),
+                'y': round(current_y + 100, 2), # Slightly below the vertex to catch the fall
+                'index': len(spawn_data['clouds']),
+            })
+            
+            # Advance
+            current_x = target_x
+            current_y = next_y
+            direction *= -1 # Switch direction for next segment
+            
+        # ---------------------------------------------------------
+        # RANDOM FILL FOR OTHER OBJECTS (Keep existing logic mostly)
+        # ---------------------------------------------------------
+        
+        # Generate collectible positions (along the path segments approx)
         collectible_count = 300 
         for i in range(collectible_count):
             ctype = 'chain' if self.rng.generate_random() < 0.4 else 'music'
-            x = get_corridor_x()
-            y = TOP_SAFE + self.rng.generate_random() * (BOTTOM_SAFE - TOP_SAFE)
-            spawn_data['collectibles'].append({
-                'type': ctype,
-                'x': round(x, 2),
-                'y': round(y, 2),
-                'index': i
-            })
+            # Pick a random point on the generated path to spawn near
+            # Interpolate between two path points
+            if len(path_points) > 1:
+                seg_idx = int(self.rng.generate_random() * (len(path_points) - 1))
+                p1 = path_points[seg_idx]
+                p2 = path_points[seg_idx+1]
+                t = self.rng.generate_random()
+                
+                # Lerp
+                px = p1[0] + (p2[0] - p1[0]) * t
+                py = p1[1] + (p2[1] - p1[1]) * t
+                
+                # Add noise
+                px += (self.rng.generate_random() - 0.5) * 300
+                
+                spawn_data['collectibles'].append({
+                    'type': ctype,
+                    'x': round(px, 2),
+                    'y': round(py, 2),
+                    'index': i
+                })
         
-        # Generate black hole positions
+        # Generate black hole positions (randomly in corridor)
         bh_count = 50 
         BH_SIZE = 300
         for i in range(bh_count):
@@ -461,32 +559,9 @@ class GameMath:
                 'will_trigger': will_trigger,
                 'index': i
             })
-        
-        # Generate cloud positions
-        cloud_count = 200 
-        CLOUD_H = 280
-        for i in range(cloud_count):
-            cloud_type = 1 if self.rng.generate_random() < 0.5 else 2
-            x = get_corridor_x()
-            y = TOP_SAFE + self.rng.generate_random() * (BOTTOM_SAFE - CLOUD_H - TOP_SAFE)
-            spawn_data['clouds'].append({
-                'type': cloud_type,
-                'x': round(x, 2),
-                'y': round(y, 2),
-                'index': i
-            })
-        
-        # Generate dark cloud positions
-        dark_cloud_count = 40
-        DARK_H = 280
-        for i in range(dark_cloud_count):
-            x = get_corridor_x()
-            y = TOP_SAFE + self.rng.generate_random() * (GROUND_Y - 500 - DARK_H - TOP_SAFE)
-            spawn_data['dark_clouds'].append({
-                'x': round(x, 2),
-                'y': round(y, 2),
-                'index': i
-            })
+            
+        # Remove all additional cosmetic clouds - only keep corner clouds for drama
+        # Generate dark cloud positions - remove for dramatic corner-only clouds
         
         # Generate pushable positions
         pushable_count = 20 

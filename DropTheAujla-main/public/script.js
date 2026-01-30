@@ -200,122 +200,149 @@ function updateProgress() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SECTION 4: RGS API CLIENT (LOCAL BACKEND FOR DEVELOPMENT)
+// SECTION 4: LOCAL GAME SIMULATION (STANDALONE MODE)
 // ═══════════════════════════════════════════════════════════════════════════
-const RGS_API = {
-    // Use local backend for development - always point to Flask on port 3000
-    baseUrl: (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
-        ? 'http://localhost:3000'  // Flask backend on port 3000
-        : 'https://your-game.stake.games/api',
-    async authenticate() {
-        const response = await fetch(`${this.baseUrl}/wallet/authenticate`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${this.getInitialToken()}`
-            },
-            body: JSON.stringify({
-                gameId: 'your-game-id',
-                timestamp: Date.now()
-            })
-        });
-        if (!response.ok) {
-            const error = await response.json().catch(() => ({}));
-            throw new RGSError('AUTH_FAILED', error.message || 'Authentication failed', response.status);
-        }
-        const data = await response.json();
+const RTP = 0.965;
+const MAX_WIN_MULTIPLIER = 5000;
+
+function seededRandom(baseRng, index) {
+    const combined = `${baseRng}:${index}`;
+    let hash = 0;
+    for (let i = 0; i < combined.length; i++) {
+        const char = combined.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash = hash & hash; // Convert to 32bit integer
+    }
+    return Math.abs(hash) / 2147483648; // Normalize to 0-1
+}
+
+function calculateOutcome(rngValue, bet, mode = 'normal') {
+    let multiplier, collectibleCount, blackHoleTriggered, blackHoleMultiplier;
+
+    if (rngValue < 0.40) {
+        multiplier = 0.0;
+        collectibleCount = 0;
+        blackHoleTriggered = false;
+        blackHoleMultiplier = 1.0;
+    } else if (rngValue < 0.75) {
+        const normalized = (rngValue - 0.40) / 0.35;
+        multiplier = 0.5 + normalized * 1.5;
+        collectibleCount = 2 + (normalized > 0.5 ? 1 : 0);
+        blackHoleTriggered = false;
+        blackHoleMultiplier = 1.0;
+    } else if (rngValue < 0.92) {
+        const normalized = (rngValue - 0.75) / 0.17;
+        multiplier = 2.0 + normalized * 8.0;
+        collectibleCount = 3 + (normalized > 0.5 ? 1 : 0);
+        blackHoleTriggered = seededRandom(rngValue, 100) < 0.3;
+        blackHoleMultiplier = blackHoleTriggered ? 1.5 + seededRandom(rngValue, 101) * 1.5 : 1.0;
+    } else if (rngValue < 0.99) {
+        const normalized = (rngValue - 0.92) / 0.07;
+        multiplier = 10.0 + normalized * 90.0;
+        collectibleCount = 4 + (normalized > 0.5 ? 1 : 0);
+        blackHoleTriggered = seededRandom(rngValue, 100) < 0.6;
+        blackHoleMultiplier = blackHoleTriggered ? 2.0 + seededRandom(rngValue, 101) * 3.0 : 1.0;
+    } else {
+        const normalized = (rngValue - 0.99) / 0.01;
+        multiplier = 100.0 + normalized * (MAX_WIN_MULTIPLIER - 100);
+        collectibleCount = 5 + (normalized > 0.5 ? 1 : 0);
+        blackHoleTriggered = true;
+        blackHoleMultiplier = 3.0 + seededRandom(rngValue, 101) * 7.0;
+    }
+
+    multiplier = Math.min(multiplier, MAX_WIN_MULTIPLIER);
+    if (blackHoleTriggered) {
+        multiplier *= blackHoleMultiplier;
+        multiplier = Math.min(multiplier, MAX_WIN_MULTIPLIER);
+    }
+
+    const payout = Math.floor(bet * multiplier);
+
+    return {
+        multiplier,
+        payout,
+        collectibleCount,
+        blackHoleTriggered,
+        blackHoleMultiplier,
+        isLoss: multiplier === 0
+    };
+}
+
+function generateAbstractEvents(outcome) {
+    const events = [];
+
+    if (outcome.isLoss || outcome.payout === 0) {
+        events.push({ type: 'end', reason: 'loss' });
+        return events;
+    }
+
+    if (outcome.collectibleCount > 0) {
+        events.push({ type: 'collectible', count: outcome.collectibleCount });
+    }
+
+    if (outcome.blackHoleTriggered) {
+        events.push({ type: 'multiplier', value: Math.round(outcome.blackHoleMultiplier * 100) / 100 });
+    }
+
+    events.push({ type: 'end', reason: 'complete' });
+    return events;
+}
+
+const LOCAL_SIM = {
+    sessionToken: 'standalone_session_' + Date.now(),
+    playerId: 'standalone_player',
+    balance: 10000 * MONETARY_PRECISION, // 10,000.00
+    minBet: MONETARY_PRECISION,
+    maxBet: 100 * MONETARY_PRECISION,
+    stepBet: MONETARY_PRECISION,
+    nonce: 0,
+
+    authenticate: async function() {
         return {
-            sessionToken: data.session_token,
-            playerId: data.player_id,
-            balance: data.balance,
-            currency: data.currency,
-            minBet: data.min_bet,
-            maxBet: data.max_bet,
-            stepBet: data.step_bet,
-            unfinishedRound: data.unfinished_round
+            sessionToken: this.sessionToken,
+            playerId: this.playerId,
+            balance: this.balance,
+            currency: 'USD',
+            minBet: this.minBet,
+            maxBet: this.maxBet,
+            stepBet: this.stepBet,
+            unfinishedRound: null
         };
     },
-    async play(bet, mode = 'normal') {
-        if (!gameSession.sessionToken) {
-            throw new RGSError('NO_SESSION', 'Not authenticated', 0);
+
+    play: async function(bet, mode = 'normal') {
+        if (bet > this.balance) {
+            throw new RGSError('INSUFFICIENT_BALANCE', 'Insufficient balance', 400);
         }
-        const response = await fetch(`${this.baseUrl}/play`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${gameSession.sessionToken}`
-            },
-            body: JSON.stringify({
-                sessionID: gameSession.sessionToken,
-                bet: bet,
-                mode: mode
-            })
-        });
-        if (!response.ok) {
-            const error = await response.json().catch(() => ({}));
-            if (response.status === 401) {
-                throw new RGSError('SESSION_EXPIRED', 'Session expired', 401);
-            }
-            if (response.status === 400) {
-                if (error.code === 'INSUFFICIENT_BALANCE') {
-                    throw new RGSError('INSUFFICIENT_BALANCE', 'Insufficient balance', 400);
-                }
-                if (error.code === 'INVALID_BET') {
-                    throw new RGSError('INVALID_BET', 'Invalid bet amount', 400);
-                }
-            }
-            throw new RGSError('PLAY_FAILED', error.message || 'Failed to place bet', response.status);
-        }
-        const data = await response.json();
-        // STAKE-COMPLIANT: Consume events, payout, flags - NOT visual_timeline
+
+        this.balance -= bet;
+        const rngValue = Math.random();
+        const outcome = calculateOutcome(rngValue, bet, mode);
+        const events = generateAbstractEvents(outcome);
+
         return {
-            roundId: data.round_id,
-            simulationId: data.simulation_id,
-            bet: data.bet,
-            balance: data.balance,
-            payout: data.payout,           // Authoritative payout from backend
-            events: data.events || [],      // Abstract events (collectible, multiplier, end)
-            flags: data.flags || {}         // Game state flags (is_loss)
+            roundId: 'round_' + Date.now(),
+            simulationId: 'sim_' + Date.now(),
+            bet: bet,
+            balance: this.balance,
+            payout: outcome.payout,
+            events: events,
+            flags: { is_loss: outcome.isLoss }
         };
     },
-    async endRound(roundId, simulationId) {
-        if (!gameSession.sessionToken) {
-            throw new RGSError('NO_SESSION', 'Not authenticated', 0);
-        }
-        const response = await fetch(`${this.baseUrl}/endround`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${gameSession.sessionToken}`
-            },
-            body: JSON.stringify({
-                sessionID: gameSession.sessionToken,
-                round_id: roundId,
-                simulation_id: simulationId
-            })
-        });
-        if (!response.ok) {
-            const error = await response.json().catch(() => ({}));
-            if (response.status === 401) {
-                throw new RGSError('SESSION_EXPIRED', 'Session expired', 401);
-            }
-            if (response.status === 404) {
-                throw new RGSError('ROUND_NOT_FOUND', 'Round not found', 404);
-            }
-            throw new RGSError('ENDROUND_FAILED', error.message || 'Failed to end round', response.status);
-        }
-        const data = await response.json();
+
+    endRound: async function(roundId, simulationId) {
+        // In standalone mode, just return success
         return {
-            roundId: data.round_id,
-            payout: data.payout,
-            balance: data.balance,
-            status: data.status
+            roundId: roundId,
+            payout: 0, // Already credited in play
+            balance: this.balance,
+            status: 'completed'
         };
-    },
-    getInitialToken() {
-        return window.STAKE_INIT_TOKEN || '';
     }
 };
+
+const RGS_API = LOCAL_SIM;
 // ═══════════════════════════════════════════════════════════════════════════
 // SECTION 5: ERROR HANDLING (USING TERMS)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -733,29 +760,40 @@ function processScheduledMultiplier() {
 
 // Spawn black hole in player's path
 function spawnScheduledBlackHole(scheduled, playerX) {
-    const spawnY = fallStartY + (targetDistance * scheduled.progress);
-
-    // Narrow corridor: player X ± 200
-    const x = playerX + (Math.random() - 0.5) * 200 - BH_SIZE / 2;
-    const y = spawnY;
-
-    const el = document.createElement("div");
-    el.className = "black-hole";
-    el.style.width = BH_SIZE + "px";
-    el.style.height = BH_SIZE + "px";
-    el.style.background = `url('items/black_hole_1.png') no-repeat center/contain`;
-    el.style.left = x + "px";
-    el.style.top = y + "px";
-    world.appendChild(el);
-
-    blackHoles.push({
-        x, y, el,
-        rotation: 0,
-        willTrigger: true,  // This is the guaranteed trigger black hole
-        isScheduled: true
-    });
-
-    console.log('[OBLIGATION] Spawned black hole at progress:', scheduled.progress.toFixed(2));
+    // Find the existing black hole that will trigger (from backend spawn data)
+    const triggerBH = blackHoles.find(bh => bh.willTrigger);
+    if (triggerBH) {
+        // Move it to the progress position
+        const spawnY = fallStartY + (targetDistance * scheduled.progress);
+        triggerBH.y = spawnY;
+        triggerBH.el.style.top = spawnY + "px";
+        // Optionally adjust X to be closer to player for better collision
+        const newX = playerX + (Math.random() - 0.5) * 200 - BH_SIZE / 2;
+        triggerBH.x = newX;
+        triggerBH.el.style.left = newX + "px";
+        scheduled.spawned = true;
+        console.log('[OBLIGATION] Moved black hole to progress:', scheduled.progress.toFixed(2));
+    } else {
+        // Fallback: spawn new one if backend didn't provide
+        const spawnY = fallStartY + (targetDistance * scheduled.progress);
+        const x = playerX + (Math.random() - 0.5) * 200 - BH_SIZE / 2;
+        const y = spawnY;
+        const el = document.createElement("div");
+        el.className = "black-hole";
+        el.style.width = BH_SIZE + "px";
+        el.style.height = BH_SIZE + "px";
+        el.style.background = `url('items/black_hole_1.png') no-repeat center/contain`;
+        el.style.left = x + "px";
+        el.style.top = y + "px";
+        world.appendChild(el);
+        blackHoles.push({
+            x, y, el,
+            rotation: 0,
+            willTrigger: true,
+            isScheduled: true
+        });
+        console.log('[OBLIGATION] Spawned black hole at progress:', scheduled.progress.toFixed(2));
+    }
 }
 
 // Apply cloud zone behavior - subtle velocity bias
@@ -841,7 +879,7 @@ function checkBlackHoleCollision() {
             // Within collision range - trigger the bonus
             if (dist < BH_SIZE * 0.8) {
                 hasTriggeredBlackHole = true;
-                triggerBonusEnter(backendBlackHoleMultiplier);
+                triggerBonusEnter(backendBlackHoleMultiplier, bh.x, bh.y);
                 return true;
             } else if (dist < BH_SIZE * 0.8) {
                 // DUMMY BLACK HOLE HIT
@@ -1220,13 +1258,17 @@ function animateEarningsTo(targetValue) {
     }
     animate();
 }
-function triggerBonusEnter(multiplier) {
+function triggerBonusEnter(multiplier, bhX, bhY) {
     inBlackHole = true;
     bhTargetMultiplier = multiplier;
     bhCurrentMultiplier = 1;
     bhAnimationStartTime = performance.now(); // FIX #2: Track start time
     fallScorePaused = true;
     originalEarnings = visualEarnings;
+    bhReturnX = camX;
+    bhReturnY = camY;
+    bhExitX = bhX + BH_SIZE / 2; // Store black hole center for exit animation
+    bhExitY = bhY + BH_SIZE / 2;
     camX = VOID_ZONE_X;
     camY = VOID_START_Y;
     velX = velY = angVel = 0;
@@ -2321,9 +2363,9 @@ function spawnTanks(count = TANK_COUNT) {
         el.style.display = "none";
         const x = randX();
         el.style.left = x + "px";
-        el.style.top = groundY + "px";
+        el.style.top = (groundY + 70) + "px";
         world.appendChild(el);
-        tanks.push({ x, y: groundY, el, active: false });
+        tanks.push({ x, y: groundY + 70, el, active: false });
     }
 }
 function spawnCamps(count = CAMP_COUNT) {
@@ -2602,6 +2644,8 @@ function generateScriptedTrajectory(seed) {
     let simVelY = 0;
     let simAngle = 0;
     let simAngVel = 0;
+    let spinDuration = 0;
+    let spinDir = 0;
 
     // Clear existing Active Clouds
     activeClouds.forEach(c => c.el.remove());
@@ -2645,7 +2689,9 @@ function generateScriptedTrajectory(seed) {
             // "Pushed away in X axis"
             simVelX = bounceDir * (15 + Math.random() * 10); // Strong push
             simVelY = 0; // Stop fall momentarily
-            simAngVel = bounceDir * 0.1; // Spin
+            spinDuration = 5; // Spin for 5 frames
+            spinDir = bounceDir;
+            simAngVel = spinDir * 0.2; // Spin
         }
 
         // 3. Move
@@ -2665,6 +2711,13 @@ function generateScriptedTrajectory(seed) {
         });
 
         simAngle += simAngVel;
+
+        // Update spin duration
+        if (spinDuration > 0) {
+            spinDuration--;
+        } else {
+            simAngVel = 0;
+        }
     }
     console.log(`[SCRIPT] Generated flight path with ${flightPath.length} frames.`);
 }
@@ -2674,13 +2727,13 @@ function spawnWorld() {
     // This defines where the character goes and where Active Clouds are
     generateScriptedTrajectory(Date.now());
 
-    // 2. SPAWN COSMETIC CLOUDS (Background)
+    // 2. SPAWN COSMETIC CLOUDS (Background) - DISABLED
     // "Scattered and much random... never in character's way"
     // Use isSafeFromPath inside spawnCosmeticCloud
     if (!bonusMode) {
         // Use backend seeds if available, or just random
         // For cosmetic, random is fine as long as safe
-        for (let i = 0; i < 200; i++) {
+        for (let i = 0; i < 0; i++) {  // Set to 0 to disable cosmetic clouds
             // FIX: Spawn around PLAYER_X (960), not 0, so they cover the screen
             spawnCosmeticCloud(naturalProximityRandX(PLAYER_X), spawnY());
         }
@@ -2695,7 +2748,7 @@ function spawnWorld() {
         // Fallback for initial page load
         for (let i = 0; i < darkcloudquantity; i++) spawnDarkCloud(randX(), spawnY());
     }
-    spawnBlackHoles(blackholequantity);
+    // spawnBlackHoles(blackholequantity);
     spawnTanks(TANK_COUNT);
     spawnCamps(CAMP_COUNT);
     spawnPushables(bonusMode ? 2000 : 20);
@@ -2826,8 +2879,9 @@ function resolveCollisions() {
     const bodyCX = camX + PLAYER_X;
     const bodyCY = camY + PLAYER_Y;
     const contacts = [];
-    // Cloud physics (cosmetic only)
-    for (const cloud of clouds) {
+    // Cloud physics - check active clouds (corner clouds) and stopping clouds
+    const allClouds = [...activeClouds, ...stoppingClouds];
+    for (const cloud of allClouds) {
         if (Math.abs(cloud.y - (camY + PLAYER_Y)) > 900) continue;
         for (const c of cloud.circles) {
             for (const p of PLAYER_COLLIDERS) {
@@ -2916,8 +2970,8 @@ function resolveCollisions() {
             }
         }
 
-        angVel = Math.max(-0.05, Math.min(0.05, angVel));
-        const corr = Math.min(Math.max(depth - 1.5, 0) * 0.45, 8);
+        angVel = Math.max(-0.15, Math.min(0.15, angVel));
+        const corr = Math.min(Math.max(depth - 1.5, 0) * 2.0, 100);
         camX += nx * corr;
         camY += ny * corr;
     }
@@ -3048,6 +3102,9 @@ function startBlackHoleAnimation(type, x, y, bh = null) {
 function exitBlackHole() {
     inBlackHole = false;
     fallScorePaused = false;
+    // Start exit animation at the black hole's position, not the plane's position
+    startBlackHoleAnimation('exit', bhExitX, bhExitY);
+    // Then snap back to return position
     camX = bhReturnX;
     camY = bhReturnY;
     velX = velY = angVel = 0;
@@ -3058,7 +3115,6 @@ function exitBlackHole() {
         bhMovingBgEl = null;
     }
     sprite.style.backgroundImage = originalSpriteBg;
-    startBlackHoleAnimation('exit', camX + PLAYER_X, camY + PLAYER_Y);
     exitingAnimation = true;
     exitAnimStart = performance.now();
     hideMultiplier();
@@ -3218,6 +3274,8 @@ function update() {
         // Smoothly interpolate if needed, but per-frame sync is best for "blind" following
         camX = frame.x;
         camY = frame.y;
+        // Remove scripted angle override to allow natural physics-based rotation during collisions
+        // angle = frame.angle;
 
         // We can still use velocity for visual effects (like particles)
         velX = frame.vx;
@@ -3242,7 +3300,7 @@ function update() {
         p.velY *= 0.95;
     }
     velX *= onGround ? GROUND_FRICTION : AIR_FRICTION;
-    angVel *= onGround ? 0.35 : 0.989;
+    angVel *= onGround ? 0.35 : 0.998;
     angle += angVel;
     // Flip detection
     angleAccumulator += angVel;
